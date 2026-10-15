@@ -799,55 +799,49 @@ const routePageMap = {
 };
 
 function PricingPage() {
+  const plans = [
+    { name: 'Starter', price: 'RM9.90', subtitle: 'Limited-use entry plan', features: ['For small businesses getting started', 'Usage limits will be confirmed before checkout', '14-day trial planned'] },
+    { name: 'Single App', price: 'RM19.90', subtitle: 'Choose one MYOPS application', features: ['OpsPS, OpsFinance or OpsFlow', 'One application per subscription', '14-day trial planned'] },
+    { name: 'Duo Bundle', price: 'RM29.90', subtitle: 'Choose any two applications', features: ['Any two of OpsPS, OpsFinance and OpsFlow', 'One monthly bundle', '14-day trial planned'] },
+    { name: 'Complete Bundle', price: 'RM39.90', subtitle: 'All three MYOPS applications', features: ['OpsPS + OpsFinance + OpsFlow', 'One monthly bundle', '14-day trial planned'] },
+  ];
+
   return (
     <PageShell pageClass="page-shell-plain">
       <section className="page-hero">
         <div className="container narrow-content">
-          <SectionIntro label="Pricing" title="Simple product access for modern operations" text="MYOPS pricing is structured around product access and business needs. OpsFinance is currently listed at RM29/month/company with a 7-day free trial. Custom development services are quoted separately based on project scope." />
+          <SectionIntro label="Pricing" title="Affordable MYOPS plans for growing businesses" text="Simple monthly pricing in Malaysian Ringgit. Plans are being prepared for launch; online subscription checkout is not yet active." />
           <div className="pricing-grid">
-            <article className="pricing-card highlight">
-              <span className="pricing-tag">OpsFinance</span>
-              <h3>Accounting &amp; Financial Management</h3>
-              <div className="price-line">
-                <strong>RM29</strong>
-                <span>/month/company</span>
-              </div>
+            {plans.map((plan) => (
+              <article className={plan.name === 'Complete Bundle' ? 'pricing-card highlight' : 'pricing-card'} key={plan.name}>
+                <span className="pricing-tag">{plan.name}</span>
+                <h3>{plan.subtitle}</h3>
+                <div className="price-line"><strong>{plan.price}</strong><span>/month</span></div>
+                <ul>{plan.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
+                <a href="/contact" className="btn btn-primary">Enquire about this plan</a>
+              </article>
+            ))}
+            <article className="pricing-card">
+              <span className="pricing-tag">OpsHub Marketplace</span>
+              <h3>Free seller registration</h3>
+              <div className="price-line"><strong>RM0</strong><span>subscription</span></div>
               <ul>
-                <li>7-day free trial</li>
-                <li>Core accounting and operational visibility</li>
-                <li>Business financial coordination</li>
+                <li>3% commission on monthly eligible sales below RM1,000</li>
+                <li>2% on RM1,000–RM9,999.99</li>
+                <li>1.5% on RM10,000 and above</li>
+                <li>Commission rules subject to final seller terms</li>
               </ul>
-              <a href="/contact" className="btn btn-primary">Talk to Us</a>
+              <a href="/contact" className="btn btn-secondary">Seller enquiry</a>
             </article>
             <article className="pricing-card">
-              <span className="pricing-tag">MYOPS</span>
-              <h3>Product ecosystem</h3>
-              <div className="price-line">
-                <strong>Custom</strong>
-                <span>pricing</span>
-              </div>
-              <ul>
-                <li>Multi-solution access</li>
-                <li>Business coordination and workflows</li>
-                <li>Tailored setup guidance</li>
-              </ul>
+              <span className="pricing-tag">Custom Services</span>
+              <h3>Website &amp; application development</h3>
+              <div className="price-line"><strong>Custom</strong><span>quote</span></div>
+              <ul><li>Custom business websites</li><li>Application development</li><li>Integration and automation</li></ul>
               <a href="/contact" className="btn btn-secondary">Request quote</a>
             </article>
-            <article className="pricing-card">
-              <span className="pricing-tag">Services</span>
-              <h3>Website &amp; application solutions</h3>
-              <div className="price-line">
-                <strong>Custom</strong>
-                <span>quote</span>
-              </div>
-              <ul>
-                <li>Website design and build</li>
-                <li>Business applications and integration</li>
-                <li>Project scoping and consultation</li>
-              </ul>
-              <a href="/contact" className="btn btn-primary">Get a Quote</a>
-            </article>
           </div>
+          <p>Planned MYOPS payment methods: FPX and DuitNow through ToyyibPay, subject to merchant activation. Monthly renewals may require a new customer-initiated payment. No payment is collected on this page.</p>
         </div>
       </section>
     </PageShell>
