@@ -733,8 +733,8 @@ function SolutionPage({ route }) {
       accent: 'purple',
       summary: 'OpsFinance helps teams bring financial clarity into day-to-day business operations and accountability.',
       bullets: ['Accounting and financial visibility', 'Expense and control tracking', 'Operational accountability', 'Reporting aligned to business activity'],
-      ctaLabel: 'Talk to finance',
-      ctaHref: '/contact',
+      ctaLabel: 'Open OpsFinance',
+      ctaHref: 'https://app.myops.com.my/',
     },
     opsflow: {
       name: 'OpsFlow',
