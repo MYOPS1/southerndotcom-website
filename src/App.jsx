@@ -1,3 +1,4 @@
+import WorkspacePage from './WorkspacePage';
 import PropTypes from 'prop-types';
 import { useEffect, useState } from 'react';
 import {
@@ -114,6 +115,7 @@ const resources = [
 
 const routes = {
   '/': LandingPage,
+  '/workspace': WorkspacePage,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
   '/solutions/opshub': SolutionPage,
