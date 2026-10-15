@@ -635,6 +635,20 @@ function SolutionsPage() {
                 <a href={product.href} className="text-link">Learn more →</a>
               </article>
             ))}
+            {[
+              { name: 'OpsWMS', icon: 'WM', summary: 'Warehouse management for inventory, locations, inbound, outbound and stock accuracy.' },
+              { name: 'OpsHR', icon: 'HR', summary: 'Human resources management for employee records, attendance, leave and people operations.' },
+            ].map((product) => (
+              <article className="solution-tile" key={product.name}>
+                <div className="solution-tile-head">
+                  <span className="solution-pill">{product.name}</span>
+                  <span className="solution-symbol">{product.icon}</span>
+                </div>
+                <h3>{product.name}</h3>
+                <p>{product.summary}</p>
+                <span className="text-link" aria-label={`${product.name} coming soon`}>Coming Soon</span>
+              </article>
+            ))}
             <article className="solution-tile service-tile">
               <div className="solution-tile-head">
                 <span className="solution-pill">Southern Dotcom</span>
