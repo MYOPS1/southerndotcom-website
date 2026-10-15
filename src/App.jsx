@@ -49,6 +49,26 @@ const products = [
     href: '/solutions/opsflow',
     summary: 'Automate processes and handoffs so teams can move faster with less operational noise.',
   },
+  {
+    slug: 'opswms',
+    name: 'OpsWMS',
+    tag: ['Warehouse', 'Management System'],
+    icon: 'WM',
+    accent: 'teal',
+    art: 'opswms',
+    comingSoon: true,
+    summary: 'Manage warehouse inventory, pallet locations, inbound, outbound and stock accuracy.',
+  },
+  {
+    slug: 'opshr',
+    name: 'OpsHR',
+    tag: ['Human Resources', 'Management'],
+    icon: 'HR',
+    accent: 'orange',
+    art: 'opshr',
+    comingSoon: true,
+    summary: 'Manage employee records, attendance, leave and HR operations in one place.',
+  },
 ];
 
 const topNavItems = [
@@ -495,9 +515,13 @@ function LandingPage() {
                 <p className="product-desc">
                   {product.summary}
                 </p>
-                <a href={product.href} className="card-link" aria-label={product.name}>
-                  <span aria-hidden="true">→</span>
-                </a>
+                {product.comingSoon ? (
+                  <span className="coming-soon-label">Coming Soon</span>
+                ) : (
+                  <a href={product.href} className="card-link" aria-label={product.name}>
+                    <span aria-hidden="true">→</span>
+                  </a>
+                )}
               </article>
             ))}
           </div>
@@ -632,21 +656,7 @@ function SolutionsPage() {
                 </div>
                 <h3>{product.name}</h3>
                 <p>{product.summary}</p>
-                <a href={product.href} className="text-link">Learn more →</a>
-              </article>
-            ))}
-            {[
-              { name: 'OpsWMS', icon: 'WM', summary: 'Warehouse management for inventory, locations, inbound, outbound and stock accuracy.' },
-              { name: 'OpsHR', icon: 'HR', summary: 'Human resources management for employee records, attendance, leave and people operations.' },
-            ].map((product) => (
-              <article className="solution-tile" key={product.name}>
-                <div className="solution-tile-head">
-                  <span className="solution-pill">{product.name}</span>
-                  <span className="solution-symbol">{product.icon}</span>
-                </div>
-                <h3>{product.name}</h3>
-                <p>{product.summary}</p>
-                <span className="text-link" aria-label={`${product.name} coming soon`}>Coming Soon</span>
+                {product.comingSoon ? <span className="text-link">Coming Soon</span> : <a href={product.href} className="text-link">Learn more →</a>}
               </article>
             ))}
             <article className="solution-tile service-tile">
