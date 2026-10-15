@@ -321,7 +321,7 @@ select {
 
 .product-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 20px;
   margin-top: 12px;
 }
@@ -1047,3 +1047,7 @@ select {
     padding-top: 24px;
   }
 }
+
+/* Upcoming products preserve MYOPS card structure and corporate palette. */
+.product-card.teal { background: linear-gradient(180deg, #eaf9f7 0%, #fffdfa 100%); }
+.coming-soon-label { position: absolute; right: 16px; bottom: 20px; border-radius: 999px; padding: 9px 13px; background: #071b49; color: #fff; font-size: .76rem; font-weight: 700; }
