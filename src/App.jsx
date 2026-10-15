@@ -499,13 +499,13 @@ function LandingPage() {
               <article className={`product-card ${product.accent}`} key={product.name}>
                 <div className="product-art">
                   <img
-                    src={`/images/${product.art}-card-art.png`}
+                    src={`/images/${product.art}-card-art.${product.comingSoon ? 'svg' : 'png'}`}
                     alt={`${product.name} illustration`}
                     width="380"
                     height="248"
                   />
                 </div>
-                <img className="product-badge" src={`/images/${product.art}-card-badge.png`} alt="" width="88" height="88" />
+                <img className="product-badge" src={`/images/${product.art}-card-badge.${product.comingSoon ? 'svg' : 'png'}`} alt="" width="88" height="88" />
                 <h3>{product.name}</h3>
                 <p className="product-tagline">
                   {product.tag.map((line) => (
