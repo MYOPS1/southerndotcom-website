@@ -69,6 +69,7 @@ const topNavItems = [
   { label: 'Resources', href: '/resources' },
   { label: 'FAQ', href: '/faq' },
   { label: 'Contact', href: '/contact' },
+  { label: 'Workspace', href: '/workspace' },
 ];
 
 const digitalDevelopmentScope = [
