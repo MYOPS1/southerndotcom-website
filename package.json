@@ -21,7 +21,6 @@
     "vite": "^5.4.21"
   },
   "dependencies": {
-    "prop-types": "^15.8.1",
-    "@supabase/supabase-js": "^2.57.0"
+    "prop-types": "^15.8.1"
   }
 }
