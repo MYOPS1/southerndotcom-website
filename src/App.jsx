@@ -1,5 +1,6 @@
 import PropTypes from 'prop-types';
 import { AccountPreview } from './AccountPreview';
+import { AuthPortal } from './AuthPortal';
 import { useEffect, useState } from 'react';
 import {
   AcceptableUsePage,
@@ -123,11 +124,18 @@ const resources = [
   { title: 'PDPA notice', href: '/pdpa', type: 'Policy' },
 ];
 
+const portal = (mode) => import.meta.env.MODE === 'preview-auth'
+  ? <AuthPortal mode={mode} />
+  : <AccountPreview mode={['dashboard', 'login', 'register'].includes(mode) ? mode : 'login'} />;
+
 const routes = {
   '/': LandingPage,
-  '/login': () => <PageShell><AccountPreview mode="login" /></PageShell>,
-  '/register': () => <PageShell><AccountPreview mode="register" /></PageShell>,
-  '/account': () => <PageShell><AccountPreview mode="dashboard" /></PageShell>,
+  '/login': () => <PageShell>{portal('login')}</PageShell>,
+  '/register': () => <PageShell>{portal('register')}</PageShell>,
+  '/forgot-password': () => <PageShell>{portal('forgot')}</PageShell>,
+  '/account/update-password': () => <PageShell>{portal('reset')}</PageShell>,
+  '/auth/callback': () => <PageShell>{portal('callback')}</PageShell>,
+  '/account': () => <PageShell>{portal('dashboard')}</PageShell>,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
   '/solutions/opsfinance': SolutionPage,
