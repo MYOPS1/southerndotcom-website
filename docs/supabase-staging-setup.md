@@ -1,14 +1,14 @@
 # MYOPS Supabase staging configuration
 
-Confirmed Supabase project reference: `iytiyugzmlsofwtortth`.
+New dedicated Supabase project reference supplied by owner (connectivity not verified): `uhuukcztdifvpjuopdea`.
 
-Expected project URL: `https://iytiyugzmlsofwtortth.supabase.co` (format-derived; connectivity not verified).
+Expected project URL: `https://uhuukcztdifvpjuopdea.supabase.co` (format-derived; connectivity not verified).
 
 ## Safe setup
 
 1. In Supabase Dashboard, verify this project is owned by MYOPS and is appropriate for staging. **Do not run the draft migration against a production database.**
 2. In Vercel's **Preview** environment (not Production), configure:
-   - `VITE_SUPABASE_URL=https://iytiyugzmlsofwtortth.supabase.co`
+   - `VITE_SUPABASE_URL=https://uhuukcztdifvpjuopdea.supabase.co`
    - `VITE_SUPABASE_PUBLISHABLE_KEY=<publishable key from Supabase dashboard>`
 3. Never commit service-role keys, database passwords, refresh tokens or user credentials to GitHub. Publishable keys are intended for frontend use, but must still be paired with proper RLS and backend authorization.
 4. Before enabling authentication, configure Supabase Auth allowed redirect URLs for the exact approved preview and application domains. Review email confirmation and SMTP settings.
