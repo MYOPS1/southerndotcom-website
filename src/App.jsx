@@ -499,7 +499,7 @@ function LandingPage() {
               <article className={`product-card ${product.accent}`} key={product.name}>
                 <div className="product-art">
                   <img
-                    src={`/images/${product.art}-card-art.${product.comingSoon ? 'svg' : 'png'}`}
+                    src={`/images/${product.art}-card-art.png`}
                     alt={`${product.name} illustration`}
                     width="380"
                     height="248"
