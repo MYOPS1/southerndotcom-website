@@ -1,4 +1,5 @@
 import PropTypes from 'prop-types';
+import { AccountPreview } from './AccountPreview';
 import { useEffect, useState } from 'react';
 import {
   AcceptableUsePage,
@@ -124,6 +125,9 @@ const resources = [
 
 const routes = {
   '/': LandingPage,
+  '/login': () => <PageShell><AccountPreview mode="login" /></PageShell>,
+  '/register': () => <PageShell><AccountPreview mode="register" /></PageShell>,
+  '/account': () => <PageShell><AccountPreview mode="dashboard" /></PageShell>,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
   '/solutions/opsfinance': SolutionPage,
