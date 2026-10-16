@@ -30,16 +30,6 @@ const products = [
     summary: 'Support product, trip, order and customer operations with a streamlined, data-rich workflow.',
   },
   {
-    slug: 'opshub',
-    name: 'OpsHub',
-    tag: ['Business Marketplace', '& Operations'],
-    icon: 'HB',
-    accent: 'orange',
-    art: 'opshub',
-    href: 'https://opshub.myops.com.my/',
-    summary: 'Grow a digital marketplace and operational network with one connected business layer.',
-  },
-  {
     slug: 'opsfinance',
     name: 'OpsFinance',
     tag: ['Accounting &', 'Financial Management'],
@@ -58,6 +48,26 @@ const products = [
     art: 'opsflow',
     href: '/solutions/opsflow',
     summary: 'Automate processes and handoffs so teams can move faster with less operational noise.',
+  },
+  {
+    slug: 'opswms',
+    name: 'OpsWMS',
+    tag: ['Warehouse', 'Management System'],
+    icon: 'WM',
+    accent: 'teal',
+    art: 'opswms',
+    comingSoon: true,
+    summary: 'Manage warehouse inventory, pallet locations, inbound, outbound and stock accuracy.',
+  },
+  {
+    slug: 'opshr',
+    name: 'OpsHR',
+    tag: ['Human Resources', 'Management'],
+    icon: 'HR',
+    accent: 'orange',
+    art: 'opshr',
+    comingSoon: true,
+    summary: 'Manage employee records, attendance, leave and HR operations in one place.',
   },
 ];
 
@@ -116,7 +126,6 @@ const routes = {
   '/': LandingPage,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
-  '/solutions/opshub': SolutionPage,
   '/solutions/opsfinance': SolutionPage,
   '/solutions/opsflow': SolutionPage,
   '/solutions/business-website-application-development': BusinessWebsiteDevelopmentPage,
@@ -154,12 +163,6 @@ const pageMeta = {
     description: 'OpsPS supports product, trip, order and customer operations in one streamlined operational workflow.',
     ogTitle: 'OpsPS | MYOPS',
     ogDescription: 'Operations support for trips, products, orders and customer coordination.',
-  },
-  '/solutions/opshub': {
-    title: 'OpsHub | MYOPS',
-    description: 'OpsHub connects marketplace and business operations so teams can manage growth and transactions effectively.',
-    ogTitle: 'OpsHub | MYOPS',
-    ogDescription: 'Marketplace and operations management for growing businesses.',
   },
   '/solutions/opsfinance': {
     title: 'OpsFinance | MYOPS',
@@ -366,7 +369,6 @@ function SiteFooter() {
           <h3>Solutions</h3>
           <a href="/solutions">Overview</a>
           <a href="/solutions/opsp">OpsPS</a>
-          <a href="/solutions/opshub">OpsHub</a>
           <a href="/solutions/opsfinance">OpsFinance</a>
           <a href="/solutions/opsflow">OpsFlow</a>
         </div>
@@ -503,7 +505,7 @@ function LandingPage() {
                     height="248"
                   />
                 </div>
-                <img className="product-badge" src={`/images/${product.art}-card-badge.png`} alt="" width="88" height="88" />
+                <img className="product-badge" src={`/images/${product.art}-card-badge.${product.comingSoon ? 'svg' : 'png'}`} alt="" width="88" height="88" />
                 <h3>{product.name}</h3>
                 <p className="product-tagline">
                   {product.tag.map((line) => (
@@ -513,9 +515,13 @@ function LandingPage() {
                 <p className="product-desc">
                   {product.summary}
                 </p>
-                <a href={product.href} className="card-link" aria-label={product.name}>
-                  <span aria-hidden="true">→</span>
-                </a>
+                {product.comingSoon ? (
+                  <span className="coming-soon-label">Coming Soon</span>
+                ) : (
+                  <a href={product.href} className="card-link" aria-label={product.name}>
+                    <span aria-hidden="true">→</span>
+                  </a>
+                )}
               </article>
             ))}
           </div>
@@ -650,7 +656,7 @@ function SolutionsPage() {
                 </div>
                 <h3>{product.name}</h3>
                 <p>{product.summary}</p>
-                <a href={product.href} className="text-link">Learn more →</a>
+                {product.comingSoon ? <span className="text-link">Coming Soon</span> : <a href={product.href} className="text-link">Learn more →</a>}
               </article>
             ))}
             <article className="solution-tile service-tile">
@@ -720,14 +726,6 @@ function SolutionPage({ route }) {
       ctaLabel: 'Contact OpsPS',
       ctaHref: '/contact',
     },
-    opshub: {
-      name: 'OpsHub',
-      accent: 'orange',
-      summary: 'OpsHub helps businesses run a connected marketplace and operational layer for growth, transactions and collaboration.',
-      bullets: ['Marketplace management', 'Business listing and coordination', 'Partner and service visibility', 'Operational coordination for growth'],
-      ctaLabel: 'Visit OpsHub',
-      ctaHref: 'https://opshub.myops.com.my/',
-    },
     opsfinance: {
       name: 'OpsFinance',
       accent: 'purple',
@@ -791,7 +789,6 @@ function BusinessWebsiteDevelopmentPage() {
 
 const routePageMap = {
   '/solutions/opsp': () => <SolutionPage route="/solutions/opsp" />,
-  '/solutions/opshub': () => <SolutionPage route="/solutions/opshub" />,
   '/solutions/opsfinance': () => <SolutionPage route="/solutions/opsfinance" />,
   '/solutions/opsflow': () => <SolutionPage route="/solutions/opsflow" />,
   '/solutions/business-website-application-development': () => <BusinessWebsiteDevelopmentPage />,
@@ -1030,7 +1027,6 @@ export default function App() {
 
   if (
     pathname === '/solutions/opsp' ||
-    pathname === '/solutions/opshub' ||
     pathname === '/solutions/opsfinance' ||
     pathname === '/solutions/opsflow' ||
     pathname === '/solutions/business-website-application-development' ||
