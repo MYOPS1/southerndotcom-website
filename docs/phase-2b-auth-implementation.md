@@ -61,6 +61,15 @@ system environment, never the request headers or user input. Use that exact bran
 alias to test; immutable deployment/PR aliases with a different Host fail closed.
 System environment variables must be enabled for the project. No wildcard domains.
 
+Draft PR #10 Preview branch alias:
+https://southerndotcom-website-git-vercel-ag-be2b7d-mohd-syaiful-nizam1.vercel.app
+
+CLI inspection verified this Preview is Ready and includes the `api/auth` Function.
+Exact intended allowlist entry (only after the owner verifies callback HTTP behavior):
+`https://southerndotcom-website-git-vercel-ag-be2b7d-mohd-syaiful-nizam1.vercel.app/auth/callback`.
+After merging to the foundation branch, switch to that branch's exact origin instead;
+PKCE cookies do not transfer across origins.
+
 The callback code exists and passes build/static checks, but deployed HTTP behavior
 and Supabase allowlist could not be verified from this sandbox. Before sending any
 email, owner must verify `/auth/callback` loads on the branch alias and `/api/auth`
