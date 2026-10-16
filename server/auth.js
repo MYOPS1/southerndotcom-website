@@ -13,7 +13,18 @@ function cookies(req) {
   }));
 }
 
-export function createAuthHandler({ env = process.env, clientFactory = createClient, transport = fetch } = {}) {
+// Explicit allowlist: never log arbitrary upstream strings, messages or error objects.
+const SIGNUP_ERROR_CODES = new Set([
+  'unexpected_failure', 'validation_failed', 'bad_json', 'signup_disabled',
+  'email_provider_disabled', 'provider_disabled', 'weak_password', 'user_already_exists',
+  'email_exists', 'email_address_not_authorized', 'email_address_invalid',
+  'over_request_rate_limit', 'over_email_send_rate_limit', 'captcha_failed',
+  'hook_timeout', 'hook_timeout_after_retry', 'hook_payload_over_size_limit',
+  'hook_payload_invalid_content_type', 'request_timeout',
+]);
+
+export function createAuthHandler({ env = process.env, clientFactory = createClient, transport = fetch,
+  diagnostic = (entry) => console.warn(JSON.stringify(entry)) } = {}) {
   return async function handler(req, res) {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -81,6 +92,15 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         // Metadata is descriptive only. Never trust it for roles or authorization.
         const { data, error } = await client.auth.signUp({ email: body.email, password: body.password,
           options: { emailRedirectTo: callback, data: { display_name: body.displayName.trim(), account_type: body.accountType } } });
+        if (error) {
+          const entry = {
+            event: 'myops_signup_error',
+            code: SIGNUP_ERROR_CODES.has(error.code) ? error.code : 'unclassified',
+            status: Number.isInteger(error.status) && error.status >= 100 && error.status <= 599 ? error.status : null,
+          };
+          // Observability must not alter auth behavior, even if the logging sink fails.
+          try { diagnostic(entry); } catch { /* No fallback that could leak error details. */ }
+        }
         if (data?.session) {
           // Confirmation disabled is a configuration error, not an auto-login path.
           await client.auth.admin.signOut(data.session.access_token, 'global');

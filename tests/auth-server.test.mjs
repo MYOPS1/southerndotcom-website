@@ -25,7 +25,7 @@ async function run(body, options = {}) {
     status(code) { this.code = code; return this; }, json(data) { this.data = data; return this; } };
   const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin,
     'content-type': 'application/json', ...options.headers }, body, ...options.request };
-  await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()), transport: options.transport })(req, res);
+  await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()), transport: options.transport, diagnostic: options.diagnostic || (() => {}) })(req, res);
   return { ...res, headers };
 }
 const login = { action: 'login', email: user.email, password: 'staging-password' };
@@ -149,4 +149,48 @@ test('missing Preview key stops signup before client initialization', async () =
   const result = await run({ action: 'register' }, { env: { VITE_SUPABASE_PUBLISHABLE_KEY: '' }, factory: () => assert.fail('must not reach Supabase') });
   assert.equal(result.code, 503);
   assert.match(result.data.error, /Preview branch and redeploy/);
+});
+
+
+test('signup diagnostics log only allowlisted codes and numeric HTTP statuses', async () => {
+  const body = { ...login, action: 'register', accountType: 'personal', displayName: 'Test' };
+  for (const [code, status, expectedCode, expectedStatus] of [
+    ['unexpected_failure', 500, 'unexpected_failure', 500],
+    ['email_address_not_authorized', 403, 'email_address_not_authorized', 403],
+    ['over_email_send_rate_limit', 429, 'over_email_send_rate_limit', 429],
+    ['hook_timeout', 500, 'hook_timeout', 500],
+    ['private@example.test', 'secret-status', 'unclassified', null],
+    [undefined, 999, 'unclassified', null],
+  ]) {
+    const entries = [];
+    const result = await run(body, { diagnostic: (entry) => entries.push(entry),
+      client: mock({ signUp: async () => ({ data: {}, error: { code, status,
+        message: 'private upstream detail', email: body.email, password: body.password, token: 'secret' } }) }) });
+    assert.deepEqual(entries, [{ event: 'myops_signup_error', code: expectedCode, status: expectedStatus }]);
+    assert.equal(result.code, status === 429 ? 429 : 502);
+    assert.ok(!JSON.stringify(result.data).includes(expectedCode));
+  }
+});
+test('successful signup and Production rejection produce no signup diagnostics', async () => {
+  const entries = [];
+  const diagnostic = (entry) => entries.push(entry);
+  const body = { ...login, action: 'register', accountType: 'personal', displayName: 'Test' };
+  assert.equal((await run(body, { diagnostic })).code, 200);
+  assert.equal((await run(body, { diagnostic, env: { VERCEL_ENV: 'production' } })).code, 404);
+  assert.deepEqual(entries, []);
+});
+test('failed diagnostic sink cannot change signup error response', async () => {
+  const result = await run({ ...login, action: 'register', accountType: 'personal', displayName: 'Test' }, {
+    diagnostic: () => { throw new Error('sink unavailable'); },
+    client: mock({ signUp: async () => ({ data: {}, error: { code: 'unexpected_failure', status: 500 } }) }),
+  });
+  assert.equal(result.code, 502);
+});
+test('signup SDK destination is exactly the dedicated staging project', async () => {
+  let destination;
+  const result = await run({ ...login, action: 'register', accountType: 'personal', displayName: 'Test' }, {
+    factory: (url) => { destination = url; return mock(); },
+  });
+  assert.equal(result.code, 200);
+  assert.equal(destination, 'https://uhuukcztdifvpjuopdea.supabase.co');
 });
