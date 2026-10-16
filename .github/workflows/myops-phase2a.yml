@@ -1,0 +1,28 @@
+name: MYOPS Phase 2A checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feature/myops-central-auth-foundation]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Verify Phase 2A preview safety
+        run: node --test tests/account-preview.test.mjs
