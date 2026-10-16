@@ -2,11 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
 
 async function request(action, fields = {}) {
-  const response = await fetch('/api/auth', {
-    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, ...fields }),
-  });
-  const result = await response.json();
+  let response;
+  try {
+    response = await fetch('/api/auth', {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...fields }),
+    });
+  } catch { throw new Error('Unable to connect. Check your connection and try again.'); }
+  let result;
+  try { result = await response.json(); }
+  catch { throw new Error('Authentication service returned an unexpected response. Reload this Preview and try again.'); }
   if (!response.ok) {
     const error = new Error(result.error || 'Request failed.');
     error.status = response.status;
@@ -45,10 +50,11 @@ export function AuthPortal({ mode }) {
 
   async function submit(event) {
     event.preventDefault();
+    if (busy) return;
     setBusy(true); setMessage('');
-    const fields = Object.fromEntries(new FormData(event.currentTarget));
-    const action = mode === 'dashboard' ? 'profile' : mode;
     try {
+      const fields = Object.fromEntries(new FormData(event.currentTarget));
+      const action = mode === 'dashboard' ? 'profile' : mode;
       const result = await request(action, fields);
       if (result.next) window.location.assign(result.next);
       else setMessage(result.message);
@@ -82,7 +88,7 @@ export function AuthPortal({ mode }) {
         </>}
         {mode === 'callback' && <p><a href="/login">Return to sign in</a></p>}
         {mode !== 'callback' && (mode !== 'dashboard' || (account && !account.profile)) && (mode !== 'reset' || account) && (
-          <form onSubmit={submit}>
+          <form onSubmit={submit} aria-busy={busy}>
             {(mode === 'register' || mode === 'dashboard') && <>
               <h2>{mode === 'dashboard' ? 'Complete your profile' : 'Account details'}</h2>
               {mode === 'dashboard' && <p>Profile saving requires the reviewed database provisioning function.</p>}
@@ -93,7 +99,8 @@ export function AuthPortal({ mode }) {
             </>}
             {['register', 'login', 'forgot'].includes(mode) && <label>Email address<input name="email" type="email" autoComplete="email" required maxLength={254} disabled={busy} /></label>}
             {['register', 'login', 'reset'].includes(mode) && <label>Password<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={mode === 'login' ? 1 : 12} maxLength={128} disabled={busy} /></label>}
-            <button className="btn btn-primary" type="submit" disabled={busy}>{({ register: 'Register', login: 'Sign in', forgot: 'Send recovery email', reset: 'Save password', dashboard: 'Save profile' })[mode]}</button>
+            {mode === 'register' && <p>Use 12–128 characters for your password. Open the confirmation email in this same browser.</p>}
+            <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? 'Please wait…' : ({ register: 'Register', login: 'Sign in', forgot: 'Send recovery email', reset: 'Save password', dashboard: 'Save profile' })[mode]}</button>
           </form>
         )}
         <p className="account-switch"><a href="/login">Sign in</a> · <a href="/register">Register</a> · <a href="/forgot-password">Forgot password?</a></p>

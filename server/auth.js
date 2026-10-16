@@ -31,7 +31,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       return reply(403, { error: 'Request rejected.' });
     }
     if (env.VITE_SUPABASE_URL !== PROJECT || !env.VITE_SUPABASE_PUBLISHABLE_KEY?.startsWith('sb_publishable_')) {
-      return reply(503, { error: 'Preview authentication configuration is incomplete.' });
+      return reply(503, { error: 'Preview authentication is not configured. Ask the owner to set both Supabase variables for this Preview branch and redeploy.' });
     }
     const saved = cookies(req);
     const writes = new Map();
@@ -87,6 +87,17 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
           return reply(503, { error: 'Email confirmation must be enabled before registration.' });
         }
         if (error?.status === 429) return reply(429, { error: 'Please wait before trying again.' });
+        if (error) {
+          // Do not echo upstream messages: they can disclose account existence or internals.
+          if (error.code === 'user_already_exists') {
+            return reply(200, { message: 'If registration is available for this address, check your email to confirm it in this browser. Otherwise sign in or reset your password.' });
+          }
+          if (error.code === 'weak_password') return reply(400, { error: 'Choose a stronger password with a mix of letters, numbers and symbols.' });
+          if (error.code === 'signup_disabled' || error.code === 'email_provider_disabled') {
+            return reply(503, { error: 'Email registration is currently unavailable. Contact the Preview owner.' });
+          }
+          return reply(502, { error: 'Registration could not be completed. Please try again later or contact the Preview owner.' });
+        }
         return reply(200, { message: 'If registration is available for this address, check your email to confirm it in this browser.' });
       }
       if (action === 'login') {

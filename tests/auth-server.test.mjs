@@ -133,3 +133,20 @@ test('real installed SDK persists PKCE verifier but never refresh/access session
   assert.ok(result.headers['Set-Cookie'].some((c) => c.startsWith('__Host-myops-pkce=')));
   assert.ok(result.headers['Set-Cookie'].every((c) => !c.startsWith('__Host-myops-access=')));
 });
+
+test('registration errors never masquerade as confirmation success or expose upstream details', async () => {
+  const body = { ...login, action: 'register', accountType: 'personal', displayName: 'Test' };
+  for (const [code, status] of [['weak_password', 400], ['signup_disabled', 503], ['email_provider_disabled', 503], ['unexpected_failure', 502]]) {
+    const result = await run(body, { client: mock({ signUp: async () => ({ data: {}, error: { code, message: 'private upstream detail' } }) }) });
+    assert.equal(result.code, status);
+    assert.ok(result.data.error);
+    assert.equal(result.data.message, undefined);
+    assert.ok(!JSON.stringify(result.data).includes('private upstream detail'));
+  }
+  assert.equal((await run(body, { client: mock({ signUp: async () => ({ data: {}, error: { status: 429 } }) }) })).code, 429);
+});
+test('missing Preview key stops signup before client initialization', async () => {
+  const result = await run({ action: 'register' }, { env: { VITE_SUPABASE_PUBLISHABLE_KEY: '' }, factory: () => assert.fail('must not reach Supabase') });
+  assert.equal(result.code, 503);
+  assert.match(result.data.error, /Preview branch and redeploy/);
+});
