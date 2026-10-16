@@ -112,6 +112,9 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
           if (error.code === 'user_already_exists') {
             return reply(200, { message: 'If registration is available for this address, check your email to confirm it in this browser. Otherwise sign in or reset your password.' });
           }
+          if (error.code === 'email_address_invalid') {
+            return reply(400, { error: 'Use a valid email address with a real inbox. Example and test domains are not supported.' });
+          }
           if (error.code === 'weak_password') return reply(400, { error: 'Choose a stronger password with a mix of letters, numbers and symbols.' });
           if (error.code === 'signup_disabled' || error.code === 'email_provider_disabled') {
             return reply(503, { error: 'Email registration is currently unavailable. Contact the Preview owner.' });

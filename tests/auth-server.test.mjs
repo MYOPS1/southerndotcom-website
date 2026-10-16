@@ -194,3 +194,17 @@ test('signup SDK destination is exactly the dedicated staging project', async ()
   assert.equal(result.code, 200);
   assert.equal(destination, 'https://uhuukcztdifvpjuopdea.supabase.co');
 });
+
+
+test('invalid upstream email returns actionable 400 without leaking upstream details', async () => {
+  const entries = [];
+  const result = await run({ ...login, action: 'register', accountType: 'personal', displayName: 'Test' }, {
+    diagnostic: (entry) => entries.push(entry),
+    client: mock({ signUp: async () => ({ data: {}, error: {
+      code: 'email_address_invalid', status: 400, message: 'private upstream detail',
+    } }) }),
+  });
+  assert.equal(result.code, 400);
+  assert.deepEqual(result.data, { error: 'Use a valid email address with a real inbox. Example and test domains are not supported.' });
+  assert.deepEqual(entries, [{ event: 'myops_signup_error', code: 'email_address_invalid', status: 400 }]);
+});
