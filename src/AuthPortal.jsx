@@ -81,7 +81,14 @@ export function AuthPortal({ mode }) {
         {mode === 'dashboard' && account && <>
           <p>Signed in as {account.email}</p>
           {account.profile && <p>{account.profile.display_name} · {account.profile.account_type === 'business' ? 'Business' : 'Personal'}</p>}
-          <p>Application access, subscriptions, organization setup and cross-app SSO are not enabled.</p>
+          <p>Paid application launches are disabled until server-side entitlements are available.</p>
+          <div aria-label="Paid application launches">
+            <button type="button" className="btn btn-primary" disabled>OpsPS — unavailable</button>{' '}
+            <button type="button" className="btn btn-primary" disabled>OpsFinance — unavailable</button>{' '}
+            <button type="button" className="btn btn-primary" disabled>OpsFlow — unavailable</button>
+          </div>
+          {account.profile?.account_type === 'business' && <p>Business workspace setup, seats and invitations are not enabled yet.</p>}
+          <p>Subscriptions and cross-app SSO are not enabled.</p>
           <p>Sessions expire; sign in again when prompted. Cross-app inactivity logout is not implemented.</p>
           <button type="button" className="btn btn-primary" disabled={busy} onClick={logout}>Sign out</button>
           <p><a href="/forgot-password">Change password</a></p>
@@ -91,7 +98,7 @@ export function AuthPortal({ mode }) {
           <form onSubmit={submit} aria-busy={busy}>
             {(mode === 'register' || mode === 'dashboard') && <>
               <h2>{mode === 'dashboard' ? 'Complete your profile' : 'Account details'}</h2>
-              {mode === 'dashboard' && <p>Profile saving requires the reviewed database provisioning function.</p>}
+              {mode === 'dashboard' && <p>Your name and account type are saved to your MYOPS account as descriptive details. Business workspaces, seats and invitations are not enabled.</p>}
               <label>Full name<input name="displayName" autoComplete="name" required maxLength={120} disabled={busy} /></label>
               <label>Account type<select name="accountType" value={accountType} onChange={(e) => setAccountType(e.target.value)} disabled={busy}>
                 <option value="personal">Personal / Individual</option><option value="business">Business</option>

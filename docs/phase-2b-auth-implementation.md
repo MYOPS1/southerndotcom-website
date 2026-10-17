@@ -20,9 +20,13 @@ This is NOT a production launch or a declaration that live auth tests passed.
   uses Node 24. Owner must update the existing CI from Node 20 to Node 24. No Supabase browser client, browser token storage
   or secret/service-role key is used.
 - Publishable key + user's JWT only. Every protected operation calls Supabase
-  `getUser(accessToken)` and requires confirmed email; profile reads explicitly filter
-  the verified user ID and remain subject to RLS. Profile writes use only the proposed
-  narrow RPC; if missing/unapproved, onboarding fails closed with a useful message.
+  `getUser(accessToken)` and requires confirmed email. Name and Individual/Business
+  selection are stored as descriptive Supabase Auth user metadata through the
+  authenticated user endpoint; the account page derives them from the verified user
+  response. This metadata is user-editable and is never trusted for authorization.
+  No profile table or proposed RPC is required. Business workspace creation, seats,
+  invitations and entitlement provisioning remain unavailable pending separately
+  reviewed and approved server-side provisioning.
 - Access JWT held in `__Host-myops-access`: Secure, HttpOnly, SameSite=Lax, Path=/,
   no Domain, lifetime capped at one hour or the upstream expiry, whichever is shorter.
   No refresh token is retained. Session expiry requires signing in again; there is
@@ -51,7 +55,8 @@ This is NOT a production launch or a declaration that live auth tests passed.
   is used. Any authenticated user may update their own password; untrusted callback
   parameters cannot select a different identity.
 - A grant row, client-rendered dashboard or account type never grants application
-  access. No app-launch endpoint is implemented. Subscriptions, SSO, organizational
+  access. Paid OpsPS, OpsFinance and OpsFlow launches are visibly disabled; no
+  app-launch endpoint is implemented. Subscriptions, SSO, organizational
   administration and product authorization remain separate.
 
 ## Trusted Preview origin and owner setup
@@ -79,6 +84,10 @@ returns JSON (503 is expected until configured), then configure Supabase.
    `VITE_SUPABASE_URL`; the publishable key is NOT present in that Preview scope.
    The supplied dashboard shows a publishable-key variable in **Production**. That
    contradicts the owner report; values were NOT read, and Production was not altered.
+   In this task environment on 2026-10-17, `VERCEL_ENV`, `VERCEL_BRANCH_URL`,
+   `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` were all unset. No
+   Vercel project credentials or key values were available, so current remote
+   Preview scopes could not be independently queried here.
 2. On the implementation branch (or after merge, the foundation branch), add BOTH
    Preview-only branch-scoped variables via Project > Settings > Environment Variables:
    https://vercel.com/mohd-syaiful-nizam1/southerndotcom-website/settings/environment-variables

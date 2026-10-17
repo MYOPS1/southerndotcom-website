@@ -94,18 +94,41 @@ test('recovery callback redirects only to fixed password page', async () => {
 test('unauthenticated account, reset and profile operations rejected', async () => {
   for (const action of ['account', 'reset', 'profile']) assert.equal((await run({ action })).code, 401);
 });
-test('account response uses verified identity and only self-profile query', async () => {
-  let filter;
-  const client = mock();
-  client.from = (table) => { assert.equal(table, 'myops_profiles'); return { select: () => ({ eq: (...args) => {
-    filter = args; return { maybeSingle: async () => ({ data: null }) };
-  } }) }; };
+test('account response uses verified identity and descriptive profile metadata', async () => {
+  const client = mock({ getUser: async (accessToken) => {
+    assert.equal(accessToken, 'test-access-token');
+    return { data: { user: { ...user, user_metadata: { display_name: 'A Person', account_type: 'business' } } }, error: null };
+  } });
+  client.from = () => assert.fail('account details must not depend on an unapproved profile table');
   const result = await run({ action: 'account', userId: 'other-user' }, { client, headers: { cookie: '__Host-myops-access=test-access-token' } });
-  assert.deepEqual(filter, ['user_id', user.id]);
-  assert.deepEqual(result.data, { email: user.email, profile: null });
+  assert.deepEqual(result.data, { email: user.email, profile: { display_name: 'A Person', account_type: 'business' } });
 });
-test('provisioning unavailable fails closed with no app access or broad table writes', async () => {
-  const result = await run({ action: 'profile', displayName: 'Test', accountType: 'business', role: 'admin' }, { headers: { cookie: '__Host-myops-access=test-access-token' } });
+test('onboarding saves only descriptive metadata through the verified user and grants no role', async () => {
+  let request;
+  const client = mock();
+  client.rpc = () => assert.fail('onboarding must not call an unapproved provisioning RPC');
+  client.from = () => assert.fail('onboarding must not depend on an unapproved profile table');
+  const result = await run({ action: 'profile', displayName: 'A Person', accountType: 'business', role: 'admin' }, {
+    client,
+    headers: { cookie: '__Host-myops-access=test-access-token' },
+    transport: async (url, init) => {
+      request = { url, ...init };
+      return { ok: true, json: async () => ({ id: user.id }) };
+    },
+  });
+  assert.equal(result.code, 200);
+  assert.deepEqual(result.data, { next: '/account' });
+  assert.equal(request.url, 'https://uhuukcztdifvpjuopdea.supabase.co/auth/v1/user');
+  assert.equal(request.method, 'PUT');
+  assert.ok(request.headers.Authorization.startsWith('Bearer '));
+  assert.deepEqual(JSON.parse(request.body), { data: { display_name: 'A Person', account_type: 'business' } });
+});
+test('onboarding rejects unsupported account types and reports upstream save failure', async () => {
+  const headers = { cookie: '__Host-myops-access=test-access-token' };
+  assert.equal((await run({ action: 'profile', displayName: 'A Person', accountType: 'admin' }, { headers })).code, 400);
+  const result = await run({ action: 'profile', displayName: 'A Person', accountType: 'personal' }, {
+    headers, transport: async () => ({ ok: false }),
+  });
   assert.equal(result.code, 503);
 });
 test('password update uses authenticated upstream, revokes refresh sessions and clears cookie', async () => {

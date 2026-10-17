@@ -13,6 +13,16 @@ function cookies(req) {
   }));
 }
 
+function profileFrom(user) {
+  const metadata = user.user_metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const displayName = metadata.display_name;
+  const accountType = metadata.account_type;
+  if (typeof displayName !== 'string' || !displayName.trim()
+      || !['personal', 'business'].includes(accountType)) return null;
+  return { display_name: displayName.trim(), account_type: accountType };
+}
+
 // Explicit allowlist: never log arbitrary upstream strings, messages or error objects.
 const SIGNUP_ERROR_CODES = new Set([
   'unexpected_failure', 'validation_failed', 'bad_json', 'signup_disabled',
@@ -171,15 +181,19 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       if (action === 'profile') {
         if (!['personal', 'business'].includes(body.accountType) || typeof body.displayName !== 'string'
             || body.displayName.trim().length < 1 || body.displayName.length > 120) return reply(400, { error: 'Invalid profile.' });
-        const { error } = await client.rpc('myops_complete_profile', { p_display_name: body.displayName.trim(), p_account_type: body.accountType });
-        if (error) return reply(503, { error: 'Profile provisioning is unavailable pending database review.' });
+        const updated = await transport(`${PROJECT}/auth/v1/user`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', apikey: env.VITE_SUPABASE_PUBLISHABLE_KEY,
+            Authorization: `Bearer ${saved[SESSION]}` },
+          body: JSON.stringify({ data: { display_name: body.displayName.trim(), account_type: body.accountType } }),
+        });
+        if (!updated.ok) return reply(503, { error: 'Profile could not be saved. Try again later.' });
+        const updatedUser = await updated.json();
+        if (updatedUser?.id !== identity.user.id) return reply(503, { error: 'Profile could not be saved. Try again later.' });
         return reply(200, { next: '/account' });
       }
-      const { data: profile, error } = await client.from('myops_profiles')
-        .select('display_name,account_type').eq('user_id', identity.user.id).maybeSingle();
-      if (error) return reply(503, { error: 'Account data is unavailable.' });
-      // No app grants/subscriptions are treated as application authorization.
-      return reply(200, { email: identity.user.email, profile });
+      // Auth metadata is user-editable and descriptive only; it never grants access.
+      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user) });
     } catch {
       // Never log SDK errors, credentials, request bodies, cookies or callback codes.
       return reply(500, { error: 'Authentication request failed. Please try again.' });
