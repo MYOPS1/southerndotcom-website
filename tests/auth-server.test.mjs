@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthHandler, signActivity, signIdentity, verifiedIdentity, resolveProductStates } from '../server/auth.js';
+import { createAuthHandler, signActivity, signIdentity, verifiedIdentity, signPending, verifiedPending, resolveProductStates } from '../server/auth.js';
 import { createClient } from '@supabase/supabase-js';
 
 const origin = 'https://trusted-preview.vercel.app';
@@ -467,5 +467,88 @@ test('regression H-1: a failed app-access revocation fails closed and still clea
   assert.ok(result.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-access=;')));
   const idle = await run({ action: 'account' }, {
     headers: { cookie: `${signedIn(15 * 60 * 1000 + 1)}; ${identityCookie()}` }, appAccessFactory });
-  assert.equal(idle.code, 500);
+  assert.equal(idle.code, 401, 'stale cookies do not produce repeated 500s');
+  assert.ok(idle.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-revoke=') && !cookie.includes('Max-Age=0')));
+});
+
+const pendingCookie = (id = user.id, ageMs = 0) => `__Host-myops-revoke=${signPending(env.MYOPS_SESSION_SECRET, id, NOW - ageMs)}`;
+const setCookies = (result) => result.headers['Set-Cookie'] || [];
+const pendingSet = (result) => setCookies(result).find((cookie) => cookie.startsWith('__Host-myops-revoke=') && !cookie.includes('Max-Age=0'));
+const pendingCleared = (result) => setCookies(result).some((cookie) => cookie.startsWith('__Host-myops-revoke=;'));
+function flaky() {
+  const state = { down: true, calls: [] };
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => {
+    state.calls.push(id);
+    if (state.down) throw new Error('app_access_down');
+    return true;
+  } });
+  return { state, appAccessFactory };
+}
+
+test('M-1: failed logout revocation is never reported as success and queues a signed retry', async () => {
+  const { appAccessFactory } = flaky();
+  const result = await run({ action: 'logout' }, { headers: { cookie: `${signedIn()}; ${identityCookie()}` }, appAccessFactory });
+  assert.equal(result.code, 500);
+  assert.ok(pendingSet(result), 'pending marker set');
+  assert.ok(setCookies(result).some((cookie) => cookie.startsWith('__Host-myops-access=;')));
+  const pending = decodeURIComponent(pendingSet(result).split(';')[0].split('=').slice(1).join('='));
+  assert.equal(verifiedPending(env.MYOPS_SESSION_SECRET, pending, NOW), user.id);
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, pending, NOW), null, 'pending and identity cookies are not interchangeable');
+});
+
+test('M-1: retry succeeds after recovery and the pending marker is cleared; repeated logout is idempotent', async () => {
+  const { state, appAccessFactory } = flaky();
+  const first = await run({ action: 'logout' }, { headers: { cookie: identityCookie() }, appAccessFactory });
+  assert.equal(first.code, 500);
+  const stillDown = await run({ action: 'logout' }, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(stillDown.code, 500);
+  assert.ok(pendingSet(stillDown));
+  state.down = false;
+  const recovered = await run({ action: 'session' }, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(recovered.code, 200);
+  assert.deepEqual(recovered.data, { signedIn: false });
+  assert.ok(pendingCleared(recovered));
+  state.calls.length = 0;
+  for (let i = 0; i < 2; i++) {
+    const again = await run({ action: 'logout' }, { headers: { cookie: identityCookie() }, appAccessFactory });
+    assert.equal(again.code, 200);
+    assert.equal(pendingSet(again), undefined);
+  }
+  assert.ok(state.calls.every((id) => id === user.id));
+});
+
+test('M-1: stale cookies during an outage do not cause repeated 500s and stay queued', async () => {
+  const { appAccessFactory } = flaky();
+  for (const action of ['session', 'account']) {
+    const result = await run({ action }, {
+      headers: { cookie: `__Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - 20 * 60 * 1000)}; ${signedIn(0).split('; ')[0]}; ${identityCookie()}` }, appAccessFactory });
+    assert.equal(result.code, action === 'session' ? 200 : 401);
+    assert.ok(pendingSet(result));
+  }
+});
+
+test('M-1: pending retry runs on any request and blocks sign-in until it succeeds (fail closed)', async () => {
+  const { state, appAccessFactory } = flaky();
+  const blocked = await run(login, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(blocked.code, 503);
+  assert.equal(setCookies(blocked).some((cookie) => cookie.startsWith('__Host-myops-access=') && !cookie.includes('Max-Age=0')), false);
+  state.down = false;
+  const ok = await run(login, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(ok.code, 200);
+  assert.ok(pendingCleared(ok));
+  assert.ok(state.calls.includes(user.id));
+});
+
+test('M-1: forged, wrong-secret, stale or identity-cookie pending markers are ignored and discarded', async () => {
+  const { state, appAccessFactory } = flaky();
+  state.down = false;
+  for (const cookie of ['__Host-myops-revoke=victim.1.AAAA',
+    `__Host-myops-revoke=${signPending('z'.repeat(40), 'victim', NOW)}`,
+    pendingCookie('victim', 25 * 3600 * 1000),
+    `__Host-myops-revoke=${signIdentity(env.MYOPS_SESSION_SECRET, 'victim', NOW)}`]) {
+    const result = await run({ action: 'session' }, { headers: { cookie }, appAccessFactory });
+    assert.equal(result.code, 200);
+    assert.ok(pendingCleared(result));
+  }
+  assert.deepEqual(state.calls, []);
 });

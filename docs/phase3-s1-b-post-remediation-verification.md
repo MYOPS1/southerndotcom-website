@@ -82,3 +82,7 @@ No CRITICAL or HIGH findings.
 **NO-GO for Production, live users or any claim that direct app access is secured** — that requires the S1-C app integrations and real staging validation.
 
 Waiting for owner approval before any staging activation.
+
+## Addendum: M-1 remediation
+
+M-1 is addressed in the follow-up commit by a signed pending-revocation marker with retry on every request (see "M-1: durable retry" in [phase3-s1-b-ticket-backend.md](./phase3-s1-b-ticket-backend.md)). Evidence: LOCAL TEST only. Residual: browser-held marker (users who never return are covered only by idle/absolute expiry); no server-side queue or scheduler. M-2 and M-3 are unchanged.

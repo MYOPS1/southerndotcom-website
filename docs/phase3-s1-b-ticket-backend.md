@@ -167,3 +167,13 @@ No Supabase migration execution and no OpsFinance integration are authorized by 
 ## S1-B security remediation (post-review)
 
 See [phase3-s1-b-security-review.md](./phase3-s1-b-security-review.md) for the findings and their remediation status. Additional proposal objects: `myops_cleanup_app_access()` (retention; schedule only after approval), `myops_promote_app_key(text)` (key rotation) and `supabase/proposals/202610170001_myops_app_access_rollback.sql` (not executed). Rate-limit client identity prefers `x-vercel-forwarded-for` (set by the platform) over client-controlled headers.
+
+## M-1: durable retry of failed app-session revocation
+
+- When revocation fails (outage, unapplied migration), MYOPS sets `__Host-myops-revoke` (HttpOnly, Secure, 24 h): an HMAC-signed `<verified user id>.<time>` marker, domain-separated from the identity cookie. It is created only from an identity the server already proved (verified token or signed identity cookie). Forged, wrong-secret, stale or identity-cookie values are ignored and discarded; browser-supplied user ids are never used.
+- Every later `/api/auth` request retries the pending revocation first. Success clears the marker; failure keeps it. `login` and `callback` return 503 until it succeeds, so a new session cannot start behind an unresolved revocation.
+- Explicit logout and password reset still return an error when revocation fails (never reported as success) and can be repeated safely (revocation is idempotent). Passive probes and expired-session responses (`session` 200 signed-out, other actions 401) no longer return 500 because of a failed revocation.
+- The 15-minute idle and 12-hour absolute limits in the database are unchanged and remain the backstop.
+- No SQL change was needed: `myops_revoke_user_app_access` is already idempotent.
+
+Remaining risks and dependencies: the marker lives in the user's browser, so a user who never returns (or clears cookies) is not retried; those sessions end by idle/absolute expiry. A scheduled server-side sweep or a database-side per-login epoch (a future SQL proposal needing approval) would close that gap. The marker holds one user; a second failure for a different user in the same browser replaces it. App-side enforcement (S1-C) is still required. Requires the same `MYOPS_SESSION_SECRET` already used for activity cookies.

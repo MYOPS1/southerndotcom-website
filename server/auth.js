@@ -8,6 +8,8 @@ const SESSION = '__Host-myops-access';
 const VERIFIER = '__Host-myops-pkce';
 const ACTIVITY = '__Host-myops-activity';
 const IDENTITY = '__Host-myops-identity';
+const PENDING = '__Host-myops-revoke';
+const PENDING_MAX_MS = 24 * 60 * 60 * 1000;
 const IDENTITY_MAX_MS = 12 * 60 * 60 * 1000;
 export const INACTIVITY_MS = 15 * 60 * 1000;
 const PROJECT = 'https://uhuukcztdifvpjuopdea.supabase.co';
@@ -54,6 +56,24 @@ export function verifiedIdentity(secret, cookie, now) {
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
   const age = now - Number(issuedAt);
   return age >= 0 && age <= IDENTITY_MAX_MS ? userId : null;
+}
+
+// A server-signed marker that app-session revocation for this verified user has not yet succeeded.
+// It is only ever created from an identity the server already proved, and is retried until it succeeds.
+export function signPending(secret, userId, issuedAt) {
+  const value = `${userId}.${issuedAt}`;
+  return `${value}.${createHmac('sha256', secret).update(`pending:${value}`).digest('base64url')}`;
+}
+
+export function verifiedPending(secret, cookie, now) {
+  if (typeof cookie !== 'string' || cookie.length > 200) return null;
+  const [userId, issuedAt, mac, extra] = cookie.split('.');
+  if (extra !== undefined || !/^[A-Za-z0-9-]{1,64}$/.test(userId || '') || !/^\d{1,15}$/.test(issuedAt || '') || !mac) return null;
+  const expected = Buffer.from(signPending(secret, userId, issuedAt));
+  const actual = Buffer.from(cookie);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  const age = now - Number(issuedAt);
+  return age >= 0 && age <= PENDING_MAX_MS ? userId : null;
 }
 
 export { PRODUCT_SLUGS, hasLifetime, resolveProductStates };
@@ -170,7 +190,23 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
       const appAccess = appAccessFactory({ env, adminFactory: clientFactory, now, project: PROJECT });
       // Revocation targets only identities proven by the server (signed cookie or verified token).
-      const revokeApps = (...ids) => [...new Set(ids.filter(Boolean))].map((id) => appAccess.revokeUserSessions(id));
+      // Revokes app access for every verified id plus any unresolved pending id. A failure is never
+      // reported as success: it leaves a signed pending marker so later requests retry it.
+      const settleRevocation = async (...ids) => {
+        const targets = [...new Set([...ids, verifiedPending(secret, saved[PENDING], now())].filter(Boolean))];
+        const results = await Promise.allSettled(targets.map((id) => appAccess.revokeUserSessions(id)));
+        const failed = targets.filter((id, index) => results[index].status === 'rejected');
+        if (failed.length) setCookie(PENDING, signPending(secret, failed[0], now()), PENDING_MAX_MS / 1000);
+        else if (saved[PENDING]) setCookie(PENDING, '', 0);
+        return failed.length === 0;
+      };
+      // Retry an earlier failed revocation on every request, before anything else can start a session.
+      const pendingUser = verifiedPending(secret, saved[PENDING], now());
+      const pendingCleared = pendingUser ? await settleRevocation() : true;
+      if (saved[PENDING] && !pendingUser) setCookie(PENDING, '', 0);
+      if (!pendingCleared && ['login', 'callback'].includes(action)) {
+        return reply(503, { error: 'Sign-in is temporarily unavailable. Try again shortly.' });
+      }
       if (action === 'register') {
         if (!validEmail || !validPassword || !['personal', 'business'].includes(body.accountType)
             || typeof body.displayName !== 'string' || body.displayName.trim().length < 1 || body.displayName.length > 120) {
@@ -238,14 +274,13 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         if (saved[SESSION]) {
           try { current = (await client.auth.getUser(saved[SESSION])).data?.user ?? null; } catch { current = null; }
         }
-        const operations = revokeApps(current?.id, cookieIdentity());
-        if (saved[SESSION]) operations.unshift(client.auth.admin.signOut(saved[SESSION], 'global'));
-        const results = await Promise.allSettled(operations);
+        const signOut = saved[SESSION]
+          ? await Promise.allSettled([client.auth.admin.signOut(saved[SESSION], 'global')]) : [];
+        const revoked = await settleRevocation(current?.id, cookieIdentity());
         // A sign-out error for a token that is already invalid is harmless; app revocation must succeed.
-        const signOutFailed = saved[SESSION] && current
-          && (results[0].status === 'rejected' || results[0].value?.error);
-        const revokeResults = saved[SESSION] ? results.slice(1) : results;
-        if (signOutFailed || revokeResults.some((result) => result.status === 'rejected')) throw new Error('logout_failed');
+        const signOutFailed = signOut.length && current
+          && (signOut[0].status === 'rejected' || signOut[0].value?.error);
+        if (signOutFailed || !revoked) throw new Error('logout_failed');
         return reply(200, { next: '/' });
       }
       if (action === 'founders') return reply(200, await payments.founders());
@@ -258,7 +293,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         const knownUser = identity.user?.id;
         clearAll();
         // MYOPS session ended (inactivity or expired/invalid token): app access ends with it.
-        await Promise.all(revokeApps(knownUser, cookieIdentity()));
+        // A failed revocation stays queued (signed pending marker); it must not turn into repeated errors here.
+        await settleRevocation(knownUser, cookieIdentity());
         if (action === 'session') return reply(200, { signedIn: false });
         return reply(401, expired ? { error: 'Your session ended. Sign in again.', reason: 'inactive' } : { error: 'Sign in to continue.' });
       }
@@ -298,13 +334,10 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
           body: JSON.stringify({ password: body.password }),
         });
         if (!updated.ok) return reply(400, { error: 'Password update failed. Request a new recovery link.' });
-        const operations = [client.auth.admin.signOut(saved[SESSION], 'global'), appAccess.revokeUserSessions(identity.user.id)];
-        const results = await Promise.allSettled(operations);
-        if (results.some((result) => result.status === 'rejected') || results.some((result) => result.value?.error)) {
-          clearAll();
-          throw new Error('password_reset_revoke_failed');
-        }
+        const signOut = await Promise.allSettled([client.auth.admin.signOut(saved[SESSION], 'global')]);
+        const revoked = await settleRevocation(identity.user.id);
         clearAll();
+        if (!revoked || signOut[0].status === 'rejected' || signOut[0].value?.error) throw new Error('password_reset_revoke_failed');
         return reply(200, { next: '/login' });
       }
       if (action === 'profile') {
