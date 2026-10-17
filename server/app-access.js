@@ -154,8 +154,8 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     });
   }
 
-  async function issueTicket({ userId, product }) {
-    if (!configured(env) || !PRODUCT.test(product)) return null;
+  async function issueTicket({ userId, product, loginSessionId }) {
+    if (!configured(env) || !PRODUCT.test(product) || !USER_ID.test(String(loginSessionId))) return null;
     const target = env[`MYOPS_APP_URL_${product.toUpperCase()}`];
     if (typeof target !== 'string') return null;
     let destination;
@@ -171,7 +171,7 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     if (!allowed) return { status: 429 };
     const ticket = randomBytes(32).toString('base64url');
     const inserted = await rpc(admin, 'myops_issue_app_ticket', {
-      p_user_id: userId, p_product_slug: product, p_ticket_hash: hashTicket(ticket),
+      p_user_id: userId, p_product_slug: product, p_ticket_hash: hashTicket(ticket), p_login_session_id: loginSessionId,
     });
     if (!inserted || inserted.status !== 'issued') return null;
     destination.pathname = `${destination.pathname.replace(/\/+$/, '')}/launch`;
@@ -181,14 +181,46 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     return { status: 200, next: destination.toString() };
   }
 
-  async function revokeUserSessions(userId) {
+  // Server-side login-session record: validity is derived from stored timestamps, not from the browser.
+  // Returns null when app access is not configured or the record cannot be created; launch then fails closed.
+  async function startLogin(userId) {
+    if (!configured(env) || !USER_ID.test(String(userId))) return null;
+    const admin = client();
+    if (!admin) return null;
+    try {
+      const id = await rpc(admin, 'myops_login_start', { p_user_id: userId });
+      return typeof id === 'string' && USER_ID.test(id) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Records MYOPS user activity (throttled to 30 s in SQL). false = login no longer live; null = unknown.
+  async function touchLogin(userId, loginSessionId) {
+    if (!configured(env) || !USER_ID.test(String(userId)) || !USER_ID.test(String(loginSessionId))) return null;
+    const admin = client();
+    if (!admin) return null;
+    try {
+      return (await rpc(admin, 'myops_login_touch', { p_id: loginSessionId, p_user_id: userId })) === true;
+    } catch {
+      return null;
+    }
+  }
+
+  const REASONS = new Set(['logout', 'password_reset', 'inactivity', 'absolute', 'admin']);
+  async function revokeUserSessions(userId, { loginSessionId, reason = 'logout' } = {}) {
     // Endpoints are disabled when unconfigured, so no app session can be granted. When configured,
     // a failure to revoke must surface to the caller (fail closed).
     if (!configured(env)) return false;
     if (!USER_ID.test(String(userId))) throw new Error('app_access_invalid_user');
     const admin = client();
     if (!admin) throw new Error('app_access_unavailable');
-    await rpc(admin, 'myops_revoke_user_app_access', { p_user_id: userId, p_reason: 'myops_logout' });
+    const why = REASONS.has(reason) ? reason : 'admin';
+    if (loginSessionId && USER_ID.test(String(loginSessionId))) {
+      await rpc(admin, 'myops_login_end', { p_id: loginSessionId, p_user_id: userId, p_reason: why });
+    } else {
+      await rpc(admin, 'myops_login_end_all', { p_user_id: userId, p_reason: why });
+    }
     return true;
   }
 
@@ -299,5 +331,5 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     }
   }
 
-  return { issueTicket, revokeUserSessions, redeem, entitlement };
+  return { issueTicket, startLogin, touchLogin, revokeUserSessions, redeem, entitlement };
 }

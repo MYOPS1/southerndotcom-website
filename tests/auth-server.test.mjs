@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthHandler, signActivity, signIdentity, verifiedIdentity, signPending, verifiedPending, resolveProductStates } from '../server/auth.js';
+import { createAuthHandler, signActivity, signIdentity, signLogin, verifiedLogin, verifiedIdentity, signPending, verifiedPending, resolveProductStates } from '../server/auth.js';
 import { createClient } from '@supabase/supabase-js';
 
 const origin = 'https://trusted-preview.vercel.app';
 const env = { VERCEL_ENV: 'preview', VERCEL_BRANCH_URL: 'trusted-preview.vercel.app', MYOPS_SESSION_SECRET: 's'.repeat(40),
   VITE_SUPABASE_URL: 'https://uhuukcztdifvpjuopdea.supabase.co', VITE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test_fixture' };
 const NOW = Date.now();
-const signedIn = (ageMs = 0) => `__Host-myops-access=test-access-token; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - ageMs)}`;
+const LOGIN_ID = '7c1f0a52-3b6e-4d58-9a41-0e2d5b8c9f13';
+const loginCookie = (id = user.id, loginId = LOGIN_ID, ageMs = 0) => `__Host-myops-login=${signLogin(env.MYOPS_SESSION_SECRET, id, loginId, NOW - ageMs)}`;
+const signedIn = (ageMs = 0) => `__Host-myops-access=test-access-token; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - ageMs)}; ${loginCookie()}`;
 const user = { id: 'test-user-a', email: 'staging@example.test', email_confirmed_at: '2026-01-01' };
 const session = { access_token: 'test-access-token', expires_at: Math.floor(Date.now() / 1000) + 3600 };
 function mock(overrides = {}) {
@@ -28,7 +30,8 @@ async function run(body, options = {}) {
   const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin,
     'content-type': 'application/json', ...options.headers }, body, ...options.request };
   await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()),
-    appAccessFactory: options.appAccessFactory, transport: options.transport, now: () => NOW, diagnostic: options.diagnostic || (() => {}) })(req, res);
+    appAccessFactory: options.appAccessFactory && ((args) => ({ startLogin: async () => LOGIN_ID, touchLogin: async () => true, ...options.appAccessFactory(args) })),
+    transport: options.transport, now: () => NOW, diagnostic: options.diagnostic || (() => {}) })(req, res);
   return { ...res, headers };
 }
 const login = { action: 'login', email: user.email, password: 'staging-password' };
@@ -551,4 +554,108 @@ test('M-1: forged, wrong-secret, stale or identity-cookie pending markers are ig
     assert.ok(pendingCleared(result));
   }
   assert.deepEqual(state.calls, []);
+});
+
+// ---- Durable login-session binding ----
+const loginCalls = () => {
+  const state = { started: [], touched: [], revoked: [], issued: [], live: true, startId: LOGIN_ID };
+  const appAccessFactory = () => ({
+    startLogin: async (id) => { state.started.push(id); return state.startId; },
+    touchLogin: async (id, loginId) => { state.touched.push([id, loginId]); return state.live; },
+    revokeUserSessions: async (id, options) => { state.revoked.push([id, options]); return true; },
+    issueTicket: async (args) => { state.issued.push(args); return { status: 200, next: 'https://app.example.test/opsp/launch#t=opaque' }; },
+  });
+  return { state, appAccessFactory };
+};
+const loginSet = (result) => setCookies(result).find((cookie) => cookie.startsWith('__Host-myops-login=') && !cookie.includes('Max-Age=0'));
+const launchRows = () => withData({ subscriptions: [personal()] });
+
+test('login binding: sign-in creates a server-side login record and a signed, user-bound cookie', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  const result = await run(login, { appAccessFactory });
+  assert.equal(result.code, 200);
+  assert.deepEqual(state.started, [user.id]);
+  const value = decodeURIComponent(loginSet(result).split(';')[0].split('=').slice(1).join('='));
+  assert.deepEqual(verifiedLogin(env.MYOPS_SESSION_SECRET, value, NOW), { userId: user.id, loginSessionId: LOGIN_ID });
+  assert.match(loginSet(result), /HttpOnly; Secure; SameSite=Lax/);
+  assert.equal(verifiedLogin(env.MYOPS_SESSION_SECRET, value.replace(user.id, 'other-user'), NOW), null, 'cannot retarget the cookie');
+  assert.equal(verifiedLogin('x'.repeat(40), value, NOW), null, 'wrong secret');
+  assert.equal(verifiedLogin(env.MYOPS_SESSION_SECRET, value, NOW + 13 * 3600 * 1000), null, 'expired');
+});
+
+test('login binding: if the login record cannot be created, sign-in works but launch fails closed', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  state.startId = null;
+  const result = await run(login, { appAccessFactory });
+  assert.equal(result.code, 200);
+  assert.equal(loginSet(result), undefined);
+  const launch = await run({ action: 'launch', product: 'opsp' }, { headers: { cookie: signedIn().replace(/; __Host-myops-login=.*/, '') },
+    env: launchEnv, client: launchRows(), appAccessFactory });
+  assert.equal(launch.code, 401);
+  assert.equal(state.issued.length, 0);
+});
+
+test('login binding: launch needs a verified login cookie that belongs to the verified user', async () => {
+  for (const extra of [loginCookie('someone-else'), '__Host-myops-login=forged.value', `__Host-myops-login=${signLogin('y'.repeat(40), user.id, LOGIN_ID, NOW)}`]) {
+    const { state, appAccessFactory } = loginCalls();
+    const base = signedIn().replace(/; __Host-myops-login=.*/, '');
+    const result = await run({ action: 'launch', product: 'opsp' }, { headers: { cookie: `${base}; ${extra}` }, env: launchEnv, client: launchRows(), appAccessFactory });
+    assert.equal(result.code, 401, extra);
+    assert.equal(state.issued.length, 0);
+  }
+  const { state, appAccessFactory } = loginCalls();
+  const ok = await run({ action: 'launch', product: 'opsp', loginSessionId: 'attacker-supplied' }, { headers: { cookie: signedIn() }, env: launchEnv, client: launchRows(), appAccessFactory });
+  assert.equal(ok.code, 200);
+  assert.deepEqual(state.issued, [{ userId: user.id, product: 'opsp', loginSessionId: LOGIN_ID }], 'browser-supplied ids are ignored');
+});
+
+test('login binding: user activity is recorded server-side, passive probes are not, and a dead login ends the session', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  await run({ action: 'session' }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.deepEqual(state.touched, [[user.id, LOGIN_ID]]);
+  await run({ action: 'session', activity: false }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.equal(state.touched.length, 1, 'passive polling is not MYOPS user activity');
+
+  state.live = false;
+  const ended = await run({ action: 'account' }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.equal(ended.code, 401);
+  assert.equal(ended.data.reason, 'inactive');
+  assert.ok(setCookies(ended).some((cookie) => cookie.startsWith('__Host-myops-access=') && cookie.includes('Max-Age=0')));
+  assert.ok(setCookies(ended).some((cookie) => cookie.startsWith('__Host-myops-login=') && cookie.includes('Max-Age=0')));
+  assert.deepEqual(state.revoked.at(-1), [user.id, { loginSessionId: LOGIN_ID, reason: 'inactivity' }]);
+
+  const unknown = loginCalls();
+  unknown.appAccessFactory = () => ({ touchLogin: async () => null, revokeUserSessions: async () => true });
+  const stillIn = await run({ action: 'session' }, { headers: { cookie: signedIn() }, appAccessFactory: unknown.appAccessFactory });
+  assert.equal(stillIn.data.signedIn, true, 'a transient lookup failure does not log the user out');
+});
+
+test('login binding: logout revokes only this login session; password reset revokes all; repeats are safe', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  for (let i = 0; i < 2; i += 1) {
+    const out = await run({ action: 'logout' }, { headers: { cookie: signedIn() }, appAccessFactory });
+    assert.equal(out.code, 200);
+  }
+  assert.deepEqual(state.revoked, [[user.id, { loginSessionId: LOGIN_ID, reason: 'logout' }], [user.id, { loginSessionId: LOGIN_ID, reason: 'logout' }]]);
+  state.revoked.length = 0;
+  const reset = await run({ action: 'reset', password: 'a-new-long-password' }, { headers: { cookie: signedIn() }, appAccessFactory,
+    transport: async () => ({ ok: true, json: async () => ({}) }) });
+  assert.equal(reset.code, 200);
+  assert.deepEqual(state.revoked, [[user.id, { reason: 'password_reset' }]], 'user-wide, no login id');
+});
+
+test('login binding: a failed per-login revocation queues a user-wide retry and never reports success', async () => {
+  const state = { down: true, calls: [] };
+  const appAccessFactory = () => ({ revokeUserSessions: async (id, options) => {
+    state.calls.push([id, options]);
+    if (state.down) throw new Error('app_access_unavailable');
+    return true;
+  } });
+  const failed = await run({ action: 'logout' }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.equal(failed.code, 500);
+  assert.ok(pendingSet(failed));
+  state.down = false;
+  const retry = await run({ action: 'session' }, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(retry.code, 200);
+  assert.deepEqual(state.calls.at(-1), [user.id, { reason: 'logout' }], 'retry is user-wide without a login id');
 });

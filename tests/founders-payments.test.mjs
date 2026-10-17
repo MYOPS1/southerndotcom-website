@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createAuthHandler, signActivity, resolveProductStates } from '../server/auth.js';
+import { createAuthHandler, signActivity, signLogin, resolveProductStates } from '../server/auth.js';
 import { createCallbackHandler } from '../server/toyyibpay-callback.js';
 import { founderEventKey } from '../server/payments.js';
 
@@ -14,7 +14,7 @@ const env = {
   MYOPS_ADMIN_USER_IDS: 'admin-user, other-admin',
 };
 const NOW = Date.now();
-const cookie = `__Host-myops-access=tok; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW)}`;
+const cookie = `__Host-myops-access=tok; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW)}; __Host-myops-login=${signLogin(env.MYOPS_SESSION_SECRET, 'user-a', '7c1f0a52-3b6e-4d58-9a41-0e2d5b8c9f13', NOW)}`;
 const person = (id = 'user-a', type = 'personal') => ({ id, email: `${id}@example.test`, email_confirmed_at: '2026-01-01',
   user_metadata: { display_name: 'A Person', account_type: type } });
 
@@ -85,7 +85,7 @@ async function authRun(body, { user = person(), ledgerState = ledger(), rows, tr
   const res = { setHeader() {}, status(code) { this.code = code; return this; }, json(data) { this.data = data; return this; } };
   const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin, 'content-type': 'application/json', cookie, ...headers }, body };
   const factory = (url, key) => (key.startsWith('sb_secret_') ? ledgerState.client : userClient(user, rows));
-  await createAuthHandler({ env: { ...env, ...extraEnv }, clientFactory: factory, appAccessFactory, transport, now: () => NOW })(req, res);
+  await createAuthHandler({ env: { ...env, ...extraEnv }, clientFactory: factory, appAccessFactory: appAccessFactory && ((args) => ({ touchLogin: async () => true, ...appAccessFactory(args) })), transport, now: () => NOW })(req, res);
   return res;
 }
 

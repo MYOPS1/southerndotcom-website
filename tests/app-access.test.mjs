@@ -10,6 +10,7 @@ import {
 const NOW = 1_900_000_000_000;
 const appId = 'opsp';
 const userId = '2bc79d9a-e917-4bab-bf29-b318a4f5542c';
+const loginSessionId = '7c1f0a52-3b6e-4d58-9a41-0e2d5b8c9f13';
 const sessionId = '3bc79d9a-e917-4bab-bf29-b318a4f5542c';
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const publicPem = publicKey.export({ type: 'spki', format: 'pem' });
@@ -93,7 +94,7 @@ test('app requests use Ed25519 signatures and the canonical request binds method
 
 test('launch ticket is 256-bit, delivered only in the registered app URL, while only its SHA-256 hash is stored', async () => {
   const { handler, calls } = make();
-  const result = await handler.issueTicket({ userId, product: 'opsp' });
+  const result = await handler.issueTicket({ userId, product: 'opsp', loginSessionId });
   assert.equal(result.status, 200);
   const url = new URL(result.next);
   assert.equal(url.origin, 'https://opsp.example.test');
@@ -103,6 +104,7 @@ test('launch ticket is 256-bit, delivered only in the registered app URL, while 
   assert.equal(rawTicket.length, 43);
   const issueCall = calls.find(([name]) => name === 'myops_issue_app_ticket');
   assert.equal(issueCall[1].p_ticket_hash, hashTicket(rawTicket));
+  assert.equal(issueCall[1].p_login_session_id, loginSessionId);
   assert.notEqual(issueCall[1].p_ticket_hash, rawTicket);
 
   let storedHash;
@@ -115,7 +117,7 @@ test('launch ticket is 256-bit, delivered only in the registered app URL, while 
     } }),
     now: () => NOW,
   });
-  const launch = await issued.issueTicket({ userId, product: 'opsp' });
+  const launch = await issued.issueTicket({ userId, product: 'opsp', loginSessionId });
   const secondRawTicket = new URLSearchParams(new URL(launch.next).hash.slice(1)).get('t');
   assert.equal(secondRawTicket.length, 43);
   assert.equal(storedHash, hashTicket(secondRawTicket));
@@ -293,4 +295,34 @@ test('regression S1-B review: staging isolation and revocation fail closed', asy
     adminFactory: () => ({ rpc: async () => ({ data: null, error: { code: 'x' } }) }) });
   await assert.rejects(dbDown.revokeUserSessions(userId));
   await assert.rejects(dbDown.revokeUserSessions('not-a-uuid'));
+});
+
+test('login-session binding: ticket issuance requires a login id; start/touch/end map to server-side RPCs and fail safely', async () => {
+  const { handler } = make();
+  assert.equal(await handler.issueTicket({ userId, product: 'opsp' }), null, 'no login session, no ticket');
+  assert.equal(await handler.issueTicket({ userId, product: 'opsp', loginSessionId: 'not-a-uuid' }), null);
+
+  const calls = [];
+  const rpcs = (answers) => createAppAccess({ env: baseEnv, now: () => NOW,
+    adminFactory: () => ({ rpc: async (name, args) => { calls.push([name, args]); return answers(name); } }) });
+  const ok = rpcs((name) => ({ data: name === 'myops_login_start' ? loginSessionId : name === 'myops_login_touch' ? true : true, error: null }));
+  assert.equal(await ok.startLogin(userId), loginSessionId);
+  assert.equal(await ok.touchLogin(userId, loginSessionId), true);
+  await ok.revokeUserSessions(userId, { loginSessionId, reason: 'logout' });
+  await ok.revokeUserSessions(userId, { reason: 'password_reset' });
+  await ok.revokeUserSessions(userId, { loginSessionId, reason: 'anything-else' });
+  assert.deepEqual(calls.map(([name]) => name), ['myops_login_start', 'myops_login_touch', 'myops_login_end', 'myops_login_end_all', 'myops_login_end']);
+  assert.deepEqual(calls[2][1], { p_id: loginSessionId, p_user_id: userId, p_reason: 'logout' });
+  assert.deepEqual(calls[3][1], { p_user_id: userId, p_reason: 'password_reset' });
+  assert.equal(calls[4][1].p_reason, 'admin', 'unknown reasons are normalised');
+
+  const down = rpcs(() => ({ data: null, error: { code: 'x' } }));
+  assert.equal(await down.startLogin(userId), null, 'start failure yields no login id (launch fails closed)');
+  assert.equal(await down.touchLogin(userId, loginSessionId), null, 'unknown liveness is not treated as revoked');
+  await assert.rejects(down.revokeUserSessions(userId, { loginSessionId }), 'failed revocation is never reported as success');
+  const denied = rpcs(() => ({ data: false, error: null }));
+  assert.equal(await denied.touchLogin(userId, loginSessionId), false);
+  const notStaging = createAppAccess({ env: { ...baseEnv, MYOPS_ENVIRONMENT: undefined }, adminFactory: () => ({}), now: () => NOW });
+  assert.equal(await notStaging.startLogin(userId), null);
+  assert.equal(await notStaging.touchLogin(userId, loginSessionId), null);
 });

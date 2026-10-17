@@ -177,3 +177,9 @@ See [phase3-s1-b-security-review.md](./phase3-s1-b-security-review.md) for the f
 - No SQL change was needed: `myops_revoke_user_app_access` is already idempotent.
 
 Remaining risks and dependencies: the marker lives in the user's browser, so a user who never returns (or clears cookies) is not retried; those sessions end by idle/absolute expiry. A scheduled server-side sweep or a database-side per-login epoch (a future SQL proposal needing approval) would close that gap. The marker holds one user; a second failure for a different user in the same browser replaces it. App-side enforcement (S1-C) is still required. Requires the same `MYOPS_SESSION_SECRET` already used for activity cookies.
+
+## Durable login-session binding
+Tickets and app sessions are now bound to a server-side MYOPS login-session record. See
+[phase3-s1-b-login-session-binding.md](./phase3-s1-b-login-session-binding.md). The SQL
+(`202610170002_myops_login_sessions.sql`) is an unapplied proposal and must be applied together with `0001`
+before the code in this branch can issue tickets.
