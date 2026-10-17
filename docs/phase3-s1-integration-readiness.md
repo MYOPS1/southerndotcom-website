@@ -1,6 +1,6 @@
 # Phase 3 — S1-A Application Integration Readiness Audit
 
-Status: **Audit and plan only. Awaiting owner approval before S1-B.** No code changed, no SQL executed, nothing merged or deployed, no live payments. Homepage, colours, 3D artwork, company details and policies are untouched.
+Status: **Audit and plan only; S1-B MYOPS backend foundation is implemented.** The migration remains unapplied and app repositories remain unchanged. No SQL executed, nothing merged or deployed, no live payments.
 
 Builds on [phase3-s1-security-design.md](./phase3-s1-security-design.md). Owner decision applied: **Option A**. The user logs in once at MYOPS. MYOPS issues a short-lived, one-time, app-specific launch ticket. Each app validates it server-to-server and creates its own session. There is no shared browser session or cookie and no second password prompt.
 
@@ -106,7 +106,7 @@ All of this is design. None of it is implemented.
 - **Issuance:** only after `launch` verifies a confirmed session, a live 15-minute activity cookie and current entitlement. A ticket is not issued if the user logged out.
 
 ### 4.2 Redemption (server to server)
-`POST {MYOPS}/api/app/redeem` with JSON `{ ticket }`, signed headers `X-App-Id`, `X-Timestamp` (within 5 minutes), `X-Nonce` and `X-Signature = HMAC-SHA256(app_secret, method|path|timestamp|nonce|sha256(body))`.
+`POST {MYOPS}/api/app/redeem` with JSON `{ ticket }`, signed with the app's Ed25519 private key. MYOPS stores only current/next public keys and validates timestamp, nonce and canonical body.
 
 MYOPS in one transaction:
 1. Verifies the app client (enabled, the signature matches in constant time, the nonce was not seen).
@@ -141,8 +141,8 @@ Default deny: every server route requires a valid app session, except `/launch` 
 ### 4.6 Operational controls
 - **Rate limiting:** `launch`, `redeem` and `entitlement` per IP and per user, with a lower limit for failed redeems. Needs a store (Vercel KV or Upstash) or a DB counter. This also closes UAT S4.
 - **Audit log** (table `myops_app_audit`): issue, redeem success and failure with a reason code, entitlement denials, and revocations. Never log tickets, secrets, cookies or full signatures.
-- **Secret rotation:** each app client has two accepted secrets (current and next) with a rotation timestamp. The raw values are shown once. MYOPS keeps only hashes or an encrypted form, depending on whether HMAC verification needs the raw key (see Risks R3).
-- **No leakage into bundles:** app secrets and the service-role key use server-only environment variable names. Never use the `VITE_`, `NEXT_PUBLIC_` or `EXPO_PUBLIC_` prefixes. CI scans the build output for the secret prefixes.
+- **Key rotation:** each app client has current and next Ed25519 public keys. App private keys remain server-only in the application environment.
+- **No leakage into bundles:** app signing private keys and the service-role key use server-only environment variable names. Never use the `VITE_`, `NEXT_PUBLIC_` or `EXPO_PUBLIC_` prefixes. CI scans the build output for the secret prefixes.
 
 ### 4.7 Old login paths and direct URLs
 For each app: disable public registration; remove or redirect the standalone login to the MYOPS homepage; reject any request without an app session; protect Vercel Preview and old deployment URLs (Vercel Deployment Protection or an env flag that refuses requests); restrict CORS; and remove any alternative token issuance. An app that keeps a separate password login remains bypassable, so the owner must decide this.
@@ -153,7 +153,7 @@ For each app: disable public registration; remove or redirect the standalone log
 | File | Change |
 |---|---|
 | `server/auth.js` | `launch` issues a ticket and returns `{ next: <registered launch URL>?t=… }`. Logout and inactivity paths call the revoke RPC. |
-| `server/app-access.js` (new) | Ticket issue, HMAC verification, redeem and introspection logic. It calls RPCs and reuses `resolveProductStates`. |
+| `server/app-access.js` (new) | Ticket issue, Ed25519 verification, redeem and introspection logic. It calls RPCs and reuses `resolveProductStates`. |
 | `api/app-redeem.js`, `api/app-entitlement.js` (new, thin handlers) | Server-to-server only. No CORS, no cookies. |
 | `server/rate-limit.js` (new) | Shared limiter. |
 | `supabase/proposals/phase3_s1_app_access.sql` (new, **proposal only**) | See 5.3. |
@@ -181,7 +181,7 @@ All tables have RLS on, no client policies, `SECURITY DEFINER` RPCs with `search
 
 ### 5.4 Environment variables (placeholder names)
 - **MYOPS server:** `MYOPS_SESSION_SECRET`, `MYOPS_SERVICE_ROLE_KEY` (both existing), `MYOPS_APP_URL_OPSFINANCE`, `MYOPS_APP_URL_OPSFLOW`, `MYOPS_APP_URL_OPSP` (now registered launch URLs), `MYOPS_RATE_LIMIT_STORE_URL`, `MYOPS_RATE_LIMIT_STORE_TOKEN`.
-- **Each app (server-only):** `MYOPS_BASE_URL`, `MYOPS_APP_ID`, `MYOPS_APP_SECRET`, `APP_SESSION_SECRET`.
+- **Each app (server-only):** `MYOPS_BASE_URL`, `MYOPS_APP_ID`, `MYOPS_APP_PRIVATE_KEY_CURRENT` / `MYOPS_APP_PRIVATE_KEY_NEXT`, `MYOPS_KEY_VERSION`, `APP_SESSION_SECRET`.
 - No variable above may carry a client-exposed prefix.
 
 ### 5.5 Deployment sequence (Preview and staging only)
@@ -240,7 +240,7 @@ All tables have RLS on, no client policies, `SECURITY DEFINER` RPCs with `search
 ## 9. Risks
 - **R1:** OpsPS cannot meet "each app enforces on its server" without new infrastructure.
 - **R2:** OpsFlow's stand-alone auth and long-lived tokens are the biggest bypass surface.
-- **R3:** HMAC verification needs the raw per-app secret on MYOPS. Storing only a hash prevents HMAC verification. The options are storing the key encrypted (key held in the environment or a KMS) or switching to asymmetric request signing (Ed25519) so MYOPS stores only public keys. **Recommendation: Ed25519**, owner and security review to confirm.
+- **R3 (resolved for S1-B):** Ed25519 is selected. MYOPS stores current/next public keys; apps keep the signing private keys. Key provisioning and rotation still need staging review.
 - **R4:** Revocation latency for normal browsing is bounded by the cache window.
 - **R5:** Coupling: a MYOPS outage blocks new sessions and sensitive actions.
 - **R6:** I read only public repository contents. Hidden environment variables, other branches or deployments may change this assessment.
@@ -254,4 +254,4 @@ All tables have RLS on, no client policies, `SECURITY DEFINER` RPCs with `search
 6. Lock down public and Preview URLs and the old login paths.
 7. Staging end-to-end UAT, security re-review, owner approval.
 
-Waiting for owner approval before S1-B.
+Waiting for owner approval before any app integration or staging migration execution.

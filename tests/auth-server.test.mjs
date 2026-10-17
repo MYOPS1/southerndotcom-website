@@ -27,7 +27,8 @@ async function run(body, options = {}) {
     status(code) { this.code = code; return this; }, json(data) { this.data = data; return this; } };
   const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin,
     'content-type': 'application/json', ...options.headers }, body, ...options.request };
-  await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()), transport: options.transport, now: () => NOW, diagnostic: options.diagnostic || (() => {}) })(req, res);
+  await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()),
+    appAccessFactory: options.appAccessFactory, transport: options.transport, now: () => NOW, diagnostic: options.diagnostic || (() => {}) })(req, res);
   return { ...res, headers };
 }
 const login = { action: 'login', email: user.email, password: 'staging-password' };
@@ -350,9 +351,15 @@ test('launch: client-supplied entitlement claims are ignored', async () => {
 });
 test('launch: active subscription returns only the configured HTTPS destination', async () => {
   const headers = { cookie: signedIn() };
-  const ok = await run({ action: 'launch', product: 'opsp' }, { headers, env: launchEnv, client: withData({ subscriptions: [personal()] }) });
+  const ok = await run({ action: 'launch', product: 'opsp' }, { headers, env: launchEnv,
+    client: withData({ subscriptions: [personal()] }),
+    appAccessFactory: () => ({ issueTicket: async ({ userId, product }) => {
+      assert.equal(userId, user.id);
+      assert.equal(product, 'opsp');
+      return { status: 200, next: 'https://app.example.test/opsp/launch?t=opaque-ticket' };
+    } }) });
   assert.equal(ok.code, 200);
-  assert.deepEqual(ok.data, { next: 'https://app.example.test/opsp' });
+  assert.deepEqual(ok.data, { next: 'https://app.example.test/opsp/launch?t=opaque-ticket' });
   for (const MYOPS_APP_URL_OPSP of [undefined, 'http://app.example.test', 'javascript:alert(1)', '//evil.example']) {
     const result = await run({ action: 'launch', product: 'opsp' }, { headers, env: { MYOPS_APP_URL_OPSP }, client: withData({ subscriptions: [personal()] }) });
     assert.equal(result.code, 503);
@@ -366,6 +373,22 @@ test('launch fails closed when subscription data cannot be read', async () => {
     assert.equal(result.code, 503);
     assert.equal(result.data.next, undefined);
   }
+});
+test('MYOPS logout and detected inactivity revoke all app sessions for the verified user', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({
+    revokeUserSessions: async (userId) => { revoked.push(userId); return true; },
+  });
+  const loggedOut = await run({ action: 'logout' }, {
+    headers: { cookie: signedIn() }, appAccessFactory,
+  });
+  assert.equal(loggedOut.code, 200);
+  assert.deepEqual(revoked, [user.id]);
+  const stale = await run({ action: 'account' }, {
+    headers: { cookie: signedIn(15 * 60 * 1000 + 1) }, appAccessFactory,
+  });
+  assert.equal(stale.code, 401);
+  assert.deepEqual(revoked, [user.id, user.id]);
 });
 test('resolveProductStates: bundles, organisation grants and catalog state', () => {
   const states = (subscriptions, grants = []) => resolveProductStates({ userId: user.id, catalog, subscriptions, grants, now: NOW });

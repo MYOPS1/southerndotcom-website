@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
+import { createAppAccess } from './app-access.js';
 import { createPayments } from './payments.js';
+import { PRODUCT_SLUGS, hasLifetime, resolveProductStates } from './entitlements.js';
 
 const SESSION = '__Host-myops-access';
 const VERIFIER = '__Host-myops-pkce';
@@ -34,39 +36,8 @@ function activityValid(secret, cookie, now) {
   return age >= 0 && age <= INACTIVITY_MS;
 }
 
-export const PRODUCT_SLUGS = ['opsp', 'opsfinance', 'opsflow', 'opswms', 'opshr'];
-
-// Pure entitlement rules. Row visibility is enforced by Supabase RLS for the caller's JWT;
-// these rules additionally fail closed on status, expiry, catalog state and grants.
+export { PRODUCT_SLUGS, hasLifetime, resolveProductStates };
 const SLUG = /^[a-z0-9_]{1,32}$/;
-
-export const hasLifetime = (userId, lifetime = []) =>
-  lifetime.some((row) => row.user_id === userId && row.status === 'active' && row.scope === 'all_apps');
-
-export function resolveProductStates({ userId, catalog, subscriptions, grants, lifetime = [], now }) {
-  const entitled = new Set();
-  const live = new Set(catalog.filter((item) => item.launch_status === 'live' && SLUG.test(item.slug)).map((item) => item.slug));
-  // Lifetime access covers every live catalog app, including apps launched after purchase.
-  if (hasLifetime(userId, lifetime)) live.forEach((slug) => entitled.add(slug));
-  for (const sub of subscriptions) {
-    if (sub.status !== 'active') continue;
-    if (sub.current_period_end && !(Date.parse(sub.current_period_end) > now)) continue;
-    if (sub.personal_user_id) {
-      if (sub.personal_user_id !== userId) continue;
-      if (sub.is_complete_bundle) live.forEach((slug) => entitled.add(slug));
-      else if (sub.product_slug) entitled.add(sub.product_slug);
-    } else if (sub.organization_id) {
-      for (const grant of grants) {
-        if (grant.organization_id === sub.organization_id && (sub.is_complete_bundle || grant.product_slug === sub.product_slug)) {
-          entitled.add(grant.product_slug);
-        }
-      }
-    }
-  }
-  const slugs = [...new Set([...PRODUCT_SLUGS, ...catalog.map((item) => item.slug).filter((slug) => SLUG.test(slug))])];
-  return Object.fromEntries(slugs.map((slug) => [slug,
-    !live.has(slug) ? 'coming_soon' : entitled.has(slug) ? 'active' : 'none']));
-}
 
 async function loadEntitlements(client, userId, now) {
   const [catalog, subscriptions, grants, lifetime] = await Promise.all([
@@ -108,7 +79,7 @@ const SIGNUP_ERROR_CODES = new Set([
   'hook_payload_invalid_content_type', 'request_timeout',
 ]);
 
-export function createAuthHandler({ env = process.env, clientFactory = createClient, transport = fetch, now = Date.now,
+export function createAuthHandler({ env = process.env, clientFactory = createClient, appAccessFactory = createAppAccess, transport = fetch, now = Date.now,
   diagnostic = (entry) => console.warn(JSON.stringify(entry)) } = {}) {
   return async function handler(req, res) {
     res.setHeader('Cache-Control', 'private, no-store');
@@ -175,6 +146,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const validPassword = typeof body.password === 'string' && body.password.length >= 12 && body.password.length <= 128;
       const callback = `${origin}/auth/callback`;
       const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
+      const appAccess = appAccessFactory({ env, adminFactory: clientFactory, now, project: PROJECT });
       if (action === 'register') {
         if (!validEmail || !validPassword || !['personal', 'business'].includes(body.accountType)
             || typeof body.displayName !== 'string' || body.displayName.trim().length < 1 || body.displayName.length > 120) {
@@ -237,18 +209,26 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         return reply(200, { next: data.redirectType === 'recovery' ? '/account/update-password' : '/' });
       }
       if (action === 'logout') {
-        if (saved[SESSION]) await client.auth.admin.signOut(saved[SESSION], 'global');
         clearAll();
+        if (saved[SESSION]) {
+          const { data: current } = await client.auth.getUser(saved[SESSION]);
+          const operations = [client.auth.admin.signOut(saved[SESSION], 'global')];
+          if (current?.user?.id) operations.push(appAccess.revokeUserSessions(current.user.id));
+          const results = await Promise.allSettled(operations);
+          if (results.some((result) => result.status === 'rejected')
+              || results[0].value?.error) throw new Error('logout_failed');
+        }
         return reply(200, { next: '/' });
       }
       if (action === 'founders') return reply(200, await payments.founders());
       if (!['account', 'reset', 'profile', 'session', 'launch', 'checkout', 'admin_audit'].includes(action)) return reply(400, { error: 'Unknown operation.' });
       const active = saved[SESSION] && activityValid(secret, saved[ACTIVITY], now());
-      const { data: identity, error: identityError } = active
+      const { data: identity, error: identityError } = saved[SESSION]
         ? await client.auth.getUser(saved[SESSION]) : { data: {}, error: true };
-      if (identityError || !identity.user?.email_confirmed_at) {
+      if (!active || identityError || !identity.user?.email_confirmed_at) {
         const expired = Boolean(saved[SESSION]);
         clearAll();
+        if (!active && identity.user?.id) await appAccess.revokeUserSessions(identity.user.id);
         if (action === 'session') return reply(200, { signedIn: false });
         return reply(401, expired ? { error: 'Your session ended. Sign in again.', reason: 'inactive' } : { error: 'Sign in to continue.' });
       }
@@ -274,11 +254,10 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         if (!products) return reply(503, { error: 'Subscription status is unavailable. Try again later.' });
         if (!products[body.product]) return reply(400, { error: 'Unknown product.' });
         if (products[body.product] !== 'active') return reply(403, { error: 'An active subscription is required for this application.' });
-        const target = env[`MYOPS_APP_URL_${body.product.toUpperCase()}`];
-        if (typeof target !== 'string' || !/^https:\/\/[^\s]+$/.test(target)) {
-          return reply(503, { error: 'Application launch is not configured for this Preview.' });
-        }
-        return reply(200, { next: target });
+        const launch = await appAccess.issueTicket({ userId: identity.user.id, product: body.product });
+        if (launch?.status === 429) return reply(429, { error: 'Please wait before trying again.' });
+        if (!launch || launch.status !== 200) return reply(503, { error: 'Secure application launch is unavailable. Try again later.' });
+        return reply(200, { next: launch.next });
       }
       if (action === 'reset') {
         if (!validPassword) return reply(400, { error: 'Use a 12–128 character password.' });
@@ -289,7 +268,12 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
           body: JSON.stringify({ password: body.password }),
         });
         if (!updated.ok) return reply(400, { error: 'Password update failed. Request a new recovery link.' });
-        await client.auth.admin.signOut(saved[SESSION], 'global');
+        const operations = [client.auth.admin.signOut(saved[SESSION], 'global'), appAccess.revokeUserSessions(identity.user.id)];
+        const results = await Promise.allSettled(operations);
+        if (results.some((result) => result.status === 'rejected') || results.some((result) => result.value?.error)) {
+          clearAll();
+          throw new Error('password_reset_revoke_failed');
+        }
         clearAll();
         return reply(200, { next: '/login' });
       }

@@ -1,0 +1,274 @@
+import { createHash, createHmac, createPublicKey, randomBytes, verify } from 'node:crypto';
+import { createClient } from '@supabase/supabase-js';
+import { resolveProductStates } from './entitlements.js';
+
+const PROJECT = 'https://uhuukcztdifvpjuopdea.supabase.co';
+const APP_ID = /^[a-z][a-z0-9_-]{1,31}$/;
+const PRODUCT = /^[a-z0-9_]{1,32}$/;
+const TICKET = /^[A-Za-z0-9_-]{43}$/;
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
+const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
+const REQUEST_SKEW_MS = 5 * 60 * 1000;
+const APP_IDLE_MS = 15 * 60 * 1000;
+
+export const hashTicket = (ticket) => createHash('sha256').update(ticket).digest('hex');
+
+export function canonicalRequest(method, path, timestamp, nonce, body) {
+  const canonicalBody = JSON.stringify(body, Object.keys(body).sort());
+  const bodyHash = createHash('sha256').update(canonicalBody).digest('hex');
+  return `${method.toUpperCase()}\n${path}\n${timestamp}\n${nonce}\n${bodyHash}`;
+}
+
+export function verifyAppSignature(publicKey, signature, message) {
+  if (typeof publicKey !== 'string' || typeof signature !== 'string' || !SIGNATURE.test(signature)) return false;
+  try {
+    return verify(null, Buffer.from(message), createPublicKey(publicKey), Buffer.from(signature, 'base64url'));
+  } catch {
+    return false;
+  }
+}
+
+function serviceClient(env, adminFactory, project) {
+  const key = env.MYOPS_SERVICE_ROLE_KEY;
+  if (typeof key !== 'string' || !key.startsWith('sb_secret_')) return null;
+  return adminFactory(project, key, { auth: { persistSession: false, autoRefreshToken: false } });
+}
+
+async function rpc(client, name, args) {
+  const { data, error } = await client.rpc(name, args);
+  if (error) throw new Error(`app_access_${name}`);
+  return data;
+}
+
+function configured(env) {
+  return env.VERCEL_ENV === 'preview'
+    && env.VITE_SUPABASE_URL === PROJECT
+    && typeof env.MYOPS_APP_USER_REF_SECRET === 'string'
+    && env.MYOPS_APP_USER_REF_SECRET.length >= 32;
+}
+
+function ipHash(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  const ip = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : 'unknown';
+  return createHash('sha256').update(ip || 'unknown').digest('hex');
+}
+
+function userRef(secret, appId, userId) {
+  return createHmac('sha256', secret).update(`${appId}:${userId}`).digest('base64url');
+}
+
+function entitlementRows(client, table, columns, userId) {
+  let query = client.from(table).select(columns);
+  if (table === 'myops_subscriptions') return query.eq('personal_user_id', userId);
+  if (table === 'myops_memberships' || table === 'myops_app_grants' || table === 'myops_lifetime_entitlements') {
+    query = query.eq('user_id', userId);
+  }
+  if (table === 'myops_memberships') query = query.eq('status', 'active');
+  if (table === 'myops_organizations') return query;
+  return query;
+}
+
+export async function loadCurrentEntitlements(client, userId, now) {
+  const [catalog, personalSubs, memberships, grants, lifetime] = await Promise.all([
+    entitlementRows(client, 'myops_products', 'slug,launch_status', userId),
+    entitlementRows(client, 'myops_subscriptions', 'personal_user_id,organization_id,product_slug,is_complete_bundle,status,current_period_end', userId),
+    entitlementRows(client, 'myops_memberships', 'organization_id', userId),
+    entitlementRows(client, 'myops_app_grants', 'organization_id,product_slug', userId),
+    entitlementRows(client, 'myops_lifetime_entitlements', 'user_id,scope,status', userId),
+  ]);
+  if (catalog.error || personalSubs.error || memberships.error || grants.error || lifetime.error) return null;
+  const orgIds = (memberships.data || []).map((row) => row.organization_id).filter(Boolean);
+  let orgSubs = { data: [], error: null };
+  if (orgIds.length) {
+    orgSubs = await client.from('myops_subscriptions')
+      .select('personal_user_id,organization_id,product_slug,is_complete_bundle,status,current_period_end')
+      .in('organization_id', orgIds);
+    if (orgSubs.error) return null;
+  }
+  const subscriptions = [...(personalSubs.data || []), ...(orgSubs.data || [])];
+  return resolveProductStates({
+    userId,
+    catalog: catalog.data || [],
+    subscriptions,
+    grants: grants.data || [],
+    lifetime: lifetime.data || [],
+    now,
+  });
+}
+
+function requestContext(req, res, env, now) {
+  const reply = (status, body) => res.status(status).json(body);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Vary', 'Origin');
+  if (env.VERCEL_ENV !== 'preview') return { done: reply(404, { error: 'Preview-only.' }) };
+  const expectedHost = env.VERCEL_BRANCH_URL;
+  if (!expectedHost || req.headers.host !== expectedHost) return { done: reply(403, { error: 'Request rejected.' }) };
+  if (req.method !== 'POST') return { done: reply(405, { error: 'Method not allowed.' }) };
+  if (req.headers.origin || !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+    return { done: reply(403, { error: 'Request rejected.' }) };
+  }
+  const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || JSON.stringify(body).length > 4000) {
+    return { done: reply(400, { error: 'Invalid request.' }) };
+  }
+  if (!configured(env)) return { done: reply(503, { error: 'Application access is not configured.' }) };
+  const appId = req.headers['x-myops-app-id'];
+  const timestamp = req.headers['x-myops-timestamp'];
+  const nonce = req.headers['x-myops-nonce'];
+  const signature = req.headers['x-myops-signature'];
+  const numericTime = typeof timestamp === 'string' && /^\d{13}$/.test(timestamp) ? Number(timestamp) : NaN;
+  if (typeof appId !== 'string' || !APP_ID.test(appId)
+      || !Number.isSafeInteger(numericTime) || Math.abs(now() - numericTime) > REQUEST_SKEW_MS
+      || typeof nonce !== 'string' || !NONCE.test(nonce)
+      || typeof signature !== 'string' || !SIGNATURE.test(signature)) {
+    return { done: reply(401, { error: 'Application request is not authorized.' }) };
+  }
+  return { body, appId, timestamp, nonce, signature, reply, ip: ipHash(req) };
+}
+
+export function createAppAccess({ env = process.env, adminFactory = createClient, now = Date.now, project = PROJECT,
+  entitlementResolver = loadCurrentEntitlements } = {}) {
+  const client = () => serviceClient(env, adminFactory, project);
+  async function permitRate(clientAdmin, key, limit, windowSeconds) {
+    const keyHash = createHash('sha256').update(key).digest('hex');
+    return rpc(clientAdmin, 'myops_check_app_rate_limit', {
+      p_key_hash: keyHash, p_limit: limit, p_window_seconds: windowSeconds,
+    });
+  }
+
+  async function issueTicket({ userId, product }) {
+    if (!configured(env) || !PRODUCT.test(product)) return null;
+    const target = env[`MYOPS_APP_URL_${product.toUpperCase()}`];
+    if (typeof target !== 'string') return null;
+    let destination;
+    try {
+      destination = new URL(target);
+      if (destination.protocol !== 'https:' || destination.username || destination.password || destination.search || destination.hash) return null;
+    } catch {
+      return null;
+    }
+    const admin = client();
+    if (!admin) return null;
+    const allowed = await permitRate(admin, `launch:${userId}:${product}`, 10, 60);
+    if (!allowed) return { status: 429 };
+    const ticket = randomBytes(32).toString('base64url');
+    const inserted = await rpc(admin, 'myops_issue_app_ticket', {
+      p_user_id: userId, p_product_slug: product, p_ticket_hash: hashTicket(ticket),
+    });
+    if (!inserted || inserted.status !== 'issued') return null;
+    destination.pathname = `${destination.pathname.replace(/\/+$/, '')}/launch`;
+    destination.searchParams.set('t', ticket);
+    return { status: 200, next: destination.toString() };
+  }
+
+  async function revokeUserSessions(userId) {
+    const admin = client();
+    if (!admin) return false;
+    await rpc(admin, 'myops_revoke_user_app_access', { p_user_id: userId, p_reason: 'myops_logout' });
+    return true;
+  }
+
+  async function authenticate(req, res, endpoint) {
+    let context;
+    try {
+      context = requestContext(req, res, env, now);
+    } catch {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(400).json({ error: 'Invalid request.' });
+    }
+    if (context.done) return context.done;
+    const { appId, timestamp, nonce, signature, body, reply, ip } = context;
+    const admin = client();
+    if (!admin) return reply(503, { error: 'Application access is not configured.' });
+    const ipAllowed = await permitRate(admin, `${endpoint}:ip:${ip}`, endpoint === 'redeem' ? 30 : 120, 60);
+    if (!ipAllowed) return reply(429, { error: 'Please wait before trying again.' });
+    const clientData = await rpc(admin, 'myops_get_app_client', { p_app_id: appId });
+    if (!clientData?.enabled) return reply(401, { error: 'Application request is not authorized.' });
+    const keyVersion = req.headers['x-myops-key-version'];
+    const publicKey = keyVersion === 'next' ? clientData.public_key_next : keyVersion === 'current' ? clientData.public_key_current : null;
+    const path = `/api/app/${endpoint}`;
+    const message = canonicalRequest('POST', path, timestamp, nonce, body);
+    if (!verifyAppSignature(publicKey, signature, message)) {
+      return reply(401, { error: 'Application request is not authorized.' });
+    }
+    const appAllowed = await permitRate(admin, `${endpoint}:app:${appId}`, endpoint === 'redeem' ? 100 : 600, 60);
+    if (!appAllowed) return reply(429, { error: 'Please wait before trying again.' });
+    const nonceHash = createHash('sha256').update(`${appId}:${nonce}`).digest('hex');
+    const nonceAccepted = await rpc(admin, 'myops_record_app_nonce', {
+      p_app_id: appId, p_nonce_hash: nonceHash,
+    });
+    if (!nonceAccepted) return reply(401, { error: 'Application request is not authorized.' });
+    return { admin, appId, clientData, body, reply };
+  }
+
+  async function redeem(req, res) {
+    let auth;
+    try {
+      auth = await authenticate(req, res, 'redeem');
+      if (!auth || typeof auth.statusCode === 'number') return auth;
+      const { admin, appId, clientData, body, reply } = auth;
+      if (Object.keys(body).length !== 1 || typeof body.ticket !== 'string' || !TICKET.test(body.ticket)) {
+        return reply(400, { error: 'Invalid request.' });
+      }
+      const redeemed = await rpc(admin, 'myops_redeem_app_ticket', {
+        p_app_id: appId, p_ticket_hash: hashTicket(body.ticket),
+      });
+      if (!redeemed || redeemed.status !== 'redeemed'
+          || redeemed.product_slug !== clientData.product_slug
+          || typeof redeemed.user_id !== 'string' || typeof redeemed.session_id !== 'string') {
+        return reply(401, { error: 'Launch ticket is invalid or expired.' });
+      }
+      const products = await entitlementResolver(admin, redeemed.user_id, now());
+      if (!products || products[clientData.product_slug] !== 'active') {
+        await rpc(admin, 'myops_revoke_app_session', {
+          p_session_id: redeemed.session_id, p_reason: 'entitlement_denied',
+        });
+        return reply(403, { error: 'Application access is not authorized.' });
+      }
+      return reply(200, {
+        session_id: redeemed.session_id,
+        user_ref: userRef(env.MYOPS_APP_USER_REF_SECRET, appId, redeemed.user_id),
+        product: clientData.product_slug,
+        idle_seconds: APP_IDLE_MS / 1000,
+      });
+    } catch {
+      return res.status(503).json({ error: 'Application access could not be verified.' });
+    }
+  }
+
+  async function entitlement(req, res) {
+    let auth;
+    try {
+      auth = await authenticate(req, res, 'entitlement');
+      if (!auth || typeof auth.statusCode === 'number') return auth;
+      const { admin, appId, clientData, body, reply } = auth;
+      if (Object.keys(body).some((key) => !['session_id', 'product', 'sensitive'].includes(key))
+          || !SESSION_ID.test(body.session_id || '') || body.product !== clientData.product_slug
+          || (body.sensitive !== undefined && typeof body.sensitive !== 'boolean')) {
+        return reply(400, { error: 'Invalid request.' });
+      }
+      const appSession = await rpc(admin, 'myops_validate_app_session', {
+        p_session_id: body.session_id, p_app_id: appId, p_product_slug: body.product,
+      });
+      if (!appSession?.active || typeof appSession.user_id !== 'string') {
+        return reply(403, { entitled: false, session_active: false });
+      }
+      const products = await entitlementResolver(admin, appSession.user_id, now());
+      const entitled = products?.[body.product] === 'active';
+      if (!entitled) {
+        await rpc(admin, 'myops_revoke_app_session', {
+          p_session_id: body.session_id, p_reason: 'entitlement_revoked',
+        });
+        return reply(403, { entitled: false, session_active: false });
+      }
+      return reply(200, { entitled: true, session_active: true, checked_at: new Date(now()).toISOString() });
+    } catch {
+      return res.status(503).json({ error: 'Application access could not be verified.' });
+    }
+  }
+
+  return { issueTicket, revokeUserSessions, redeem, entitlement };
+}

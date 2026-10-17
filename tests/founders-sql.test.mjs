@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
 
 // Runs the PROPOSED Phase 3 SQL against a throwaway local PostgreSQL cluster (never Supabase)
 // with genuinely concurrent sessions. Skipped when PostgreSQL binaries are not installed.
@@ -34,6 +35,7 @@ async function newUser({ confirmed = true, type = 'personal' } = {}) {
   return id;
 }
 const order = () => `MYOPS-test-${String(++counter).padStart(6, '0')}${Math.random().toString(36).slice(2, 8)}`;
+const ticketHash = () => randomBytes(32).toString('hex');
 const bill = () => `b${Math.random().toString(36).slice(2, 10)}`;
 async function checkout(user, plan = 'founders_lifetime', product = plan === 'single_app_monthly' ? 'opsp' : null) {
   const ref = order();
@@ -68,6 +70,8 @@ before(async () => {
   }
   const proposal = new URL('../supabase/proposals/phase3_founders_100.sql', import.meta.url).pathname;
   await run(`${binDir}/psql`, ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', sock, '-p', String(PORT), '-U', 'postgres', '-d', 'myops', '-f', proposal]);
+  const appAccessProposal = new URL('../supabase/proposals/202610170001_myops_app_access.sql', import.meta.url).pathname;
+  await run(`${binDir}/psql`, ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', sock, '-p', String(PORT), '-U', 'postgres', '-d', 'myops', '-f', appAccessProposal]);
   // Supabase grants service_role BYPASSRLS; the stub cluster must match.
   await sql('alter role service_role bypassrls; grant execute on all functions in schema public to service_role');
   await sql('revoke execute on all functions in schema public from public, anon, authenticated');
@@ -288,4 +292,96 @@ test('proposal file keeps service_role-only grants and no client write policies'
   assert.doesNotMatch(text, /grant execute[^;]*to[^;]*(anon|authenticated|public)/i);
   assert.doesNotMatch(text, /create policy[^;]*for (insert|update|delete|all)/i);
   assert.equal((text.match(/security definer set search_path = ''/g) || []).length, (text.match(/create or replace function/g) || []).length);
+});
+
+test('S1 app-access proposal has RLS and service_role-only functions', { skip }, async () => {
+  const names = ['myops_app_clients', 'myops_app_tickets', 'myops_app_nonces', 'myops_app_rate_limits', 'myops_app_audit'];
+  const rls = await sql(`select string_agg(relname, ',' order by relname) from pg_class
+    where relname = any(array[${names.map(q).join(',')}]) and relrowsecurity`);
+  assert.equal(rls, names.sort().join(','));
+  for (const role of ['anon', 'authenticated']) {
+    await assert.rejects(sql(`select public.myops_get_app_client('opsp')`, { role }), /permission denied/);
+    await assert.rejects(sql('select * from public.myops_app_tickets', { role }), /permission denied/);
+    await assert.rejects(sql(`select public.myops_redeem_app_ticket('opsp', repeat('a',64))`, { role }), /permission denied/);
+  }
+});
+
+test('S1 tickets are app-bound, expire in 60 seconds, and concurrent redemption consumes once', { skip }, async () => {
+  const user = await newUser();
+  const key = `'-----BEGIN PUBLIC KEY-----\\n${'A'.repeat(120)}\\n-----END PUBLIC KEY-----'`;
+  for (const [id, product] of [['opsp', 'opsp'], ['opsfinance', 'opsfinance']]) {
+    await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
+      values (${q(id)}, ${q(product)}, ${key}, true)
+      on conflict (app_id) do update set public_key_current = excluded.public_key_current, enabled = true`);
+  }
+  const validHash = ticketHash();
+  assert.equal((await call(`select public.myops_issue_app_ticket(${q(user)}, 'opsp', ${q(validHash)})`)).status, 'issued');
+  const lifetime = await sql(`select extract(epoch from (expires_at - created_at))::int from public.myops_app_tickets where ticket_hash = ${q(validHash)}`);
+  assert.equal(lifetime, '60');
+  const wrongApp = await call(`select public.myops_redeem_app_ticket('opsfinance', ${q(validHash)})`);
+  assert.equal(wrongApp.status, 'denied');
+  const attempts = await Promise.all([
+    call(`select public.myops_redeem_app_ticket('opsp', ${q(validHash)})`),
+    call(`select public.myops_redeem_app_ticket('opsp', ${q(validHash)})`),
+  ]);
+  assert.equal(attempts.filter((result) => result.status === 'redeemed').length, 1);
+  assert.equal(attempts.filter((result) => result.status === 'denied').length, 1);
+  assert.equal(await svc(`select count(*) from public.myops_app_sessions where user_id = ${q(user)} and app_id = 'opsp'`), '1');
+});
+
+test('S1 expired tickets, replayed nonces, rate limits and logout revocation fail closed', { skip }, async () => {
+  const user = await newUser();
+  const key = `'-----BEGIN PUBLIC KEY-----\\n${'B'.repeat(120)}\\n-----END PUBLIC KEY-----'`;
+  await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
+    values ('opsp', 'opsp', ${key}, true)
+    on conflict (app_id) do update set public_key_current = excluded.public_key_current, enabled = true`);
+  const expiredHash = ticketHash();
+  await call(`select public.myops_issue_app_ticket(${q(user)}, 'opsp', ${q(expiredHash)})`);
+  await svc(`update public.myops_app_tickets set created_at = now() - interval '2 minutes',
+    expires_at = now() - interval '1 minute' where ticket_hash = ${q(expiredHash)}`);
+  assert.equal((await call(`select public.myops_redeem_app_ticket('opsp', ${q(expiredHash)})`)).status, 'denied');
+
+  const nonce = ticketHash();
+  assert.equal(await svc(`select count(*) from public.myops_app_clients where app_id = 'opsp' and enabled`), '1');
+  assert.equal(await svc(`select ${q(nonce)} ~ '^[a-f0-9]{64}$'`), 't');
+  const nonceResult = await svc(`select public.myops_record_app_nonce('opsp', ${q(nonce)})`);
+  assert.equal(nonceResult, 't', `nonce insert failed; table rows: ${await svc('select count(*) from public.myops_app_nonces')}`);
+  assert.equal(await svc(`select public.myops_record_app_nonce('opsp', ${q(nonce)})`), 'f');
+
+  const rateKey = ticketHash();
+  assert.equal(await svc(`select public.myops_check_app_rate_limit(${q(rateKey)}, 2, 60)`), 't');
+  assert.equal(await svc(`select public.myops_check_app_rate_limit(${q(rateKey)}, 2, 60)`), 't');
+  assert.equal(await svc(`select public.myops_check_app_rate_limit(${q(rateKey)}, 2, 60)`), 'f');
+
+  const rawHash = ticketHash();
+  await call(`select public.myops_issue_app_ticket(${q(user)}, 'opsp', ${q(rawHash)})`);
+  const redeemed = await call(`select public.myops_redeem_app_ticket('opsp', ${q(rawHash)})`);
+  assert.equal(redeemed.status, 'redeemed');
+  const unusedHash = ticketHash();
+  await call(`select public.myops_issue_app_ticket(${q(user)}, 'opsp', ${q(unusedHash)})`);
+  assert.ok(await svc(`select public.myops_revoke_user_app_access(${q(user)}, 'myops_logout')`));
+  assert.equal((await call(`select public.myops_validate_app_session(${q(redeemed.session_id)}, 'opsp', 'opsp')`)).active, false);
+  assert.equal(await svc(`select revoked_at is not null from public.myops_app_tickets where ticket_hash = ${q(unusedHash)}`), 't');
+});
+
+test('S1 idle app sessions are revoked after 15 minutes', { skip }, async () => {
+  const user = await newUser();
+  const key = `'-----BEGIN PUBLIC KEY-----\\n${'C'.repeat(120)}\\n-----END PUBLIC KEY-----'`;
+  await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
+    values ('opsp', 'opsp', ${key}, true)
+    on conflict (app_id) do update set public_key_current = excluded.public_key_current, enabled = true`);
+  const hash = ticketHash();
+  await call(`select public.myops_issue_app_ticket(${q(user)}, 'opsp', ${q(hash)})`);
+  const redeemed = await call(`select public.myops_redeem_app_ticket('opsp', ${q(hash)})`);
+  await svc(`update public.myops_app_sessions set last_activity_at = now() - interval '16 minutes' where id = ${q(redeemed.session_id)}`);
+  assert.equal((await call(`select public.myops_validate_app_session(${q(redeemed.session_id)}, 'opsp', 'opsp')`)).active, false);
+  assert.equal(await svc(`select ended_reason from public.myops_app_sessions where id = ${q(redeemed.session_id)}`), 'idle_expired');
+});
+
+test('S1 SQL proposal retains pinned search_path and has no client write policies', () => {
+  const text = readFileSync(new URL('../supabase/proposals/202610170001_myops_app_access.sql', import.meta.url), 'utf8');
+  assert.equal((text.match(/security definer set search_path = ''/g) || []).length, (text.match(/create or replace function/g) || []).length);
+  assert.match(text, /grant execute[^;]*to service_role;/s);
+  assert.doesNotMatch(text, /create policy[^;]*for (insert|update|delete|all)/i);
+  assert.match(text, /NOT EXECUTED/);
 });

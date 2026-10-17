@@ -35,6 +35,7 @@ function ledger({ cap = 100, allocated = 0, ineligible = ['biz', 'nobody'] } = {
   const handlers = {
     myops_founders_status: () => ({ capacity: cap, allocated: size(), remaining: Math.max(0, cap - size()) }),
     myops_provision_profile: (a) => { state.provisioned.push(a); return true; },
+    myops_revoke_user_app_access: () => true,
     myops_create_payment: ({ p_user_id: user, p_plan: plan, p_product_slug: product, p_order_ref: ref }) => {
       if (ineligible.includes(user)) return { status: 'not_eligible' };
       if (!['founders_lifetime', 'single_app_monthly'].includes(plan)) return { status: 'plan_disabled' };
@@ -80,11 +81,11 @@ const gateway = ({ bill = 'abc123XY', paid = [], failBill = false, down = false 
   return { transport, requests };
 };
 
-async function authRun(body, { user = person(), ledgerState = ledger(), rows, transport, extraEnv, headers } = {}) {
+async function authRun(body, { user = person(), ledgerState = ledger(), rows, transport, extraEnv, headers, appAccessFactory } = {}) {
   const res = { setHeader() {}, status(code) { this.code = code; return this; }, json(data) { this.data = data; return this; } };
   const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin, 'content-type': 'application/json', cookie, ...headers }, body };
   const factory = (url, key) => (key.startsWith('sb_secret_') ? ledgerState.client : userClient(user, rows));
-  await createAuthHandler({ env: { ...env, ...extraEnv }, clientFactory: factory, transport, now: () => NOW })(req, res);
+  await createAuthHandler({ env: { ...env, ...extraEnv }, clientFactory: factory, appAccessFactory, transport, now: () => NOW })(req, res);
   return res;
 }
 
@@ -331,8 +332,9 @@ test('session reports lifetime and the launch gate follows it server-side, with 
   const session = await authRun({ action: 'session' }, { rows });
   assert.equal(session.data.lifetime, true);
   assert.equal(session.data.products.opsp, 'active');
-  const launch = await authRun({ action: 'launch', product: 'opsnew' }, { rows, extraEnv: { MYOPS_APP_URL_OPSNEW: 'https://app.example.test/new' } });
-  assert.deepEqual(launch.data, { next: 'https://app.example.test/new' });
+  const launch = await authRun({ action: 'launch', product: 'opsnew' }, { rows,
+    appAccessFactory: () => ({ issueTicket: async () => ({ status: 200, next: 'https://app.example.test/new/launch?t=opaque' }) }) });
+  assert.deepEqual(launch.data, { next: 'https://app.example.test/new/launch?t=opaque' });
   const denied = await authRun({ action: 'launch', product: 'opsp' }, { rows: { myops_products: catalog }, extraEnv: { MYOPS_APP_URL_OPSP: 'https://app.example.test/opsp' } });
   assert.equal(denied.code, 403);
   const unknown = await authRun({ action: 'launch', product: 'nothere' }, { rows });
