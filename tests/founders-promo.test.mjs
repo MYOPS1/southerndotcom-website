@@ -27,7 +27,7 @@ async function mount(respond) {
     createElement(FoundersPromo), createElement('article', { id: 'opsp' }, createElement(ProductAction, { product: { slug: 'opsp' } }))))));
   return { calls, cleanup: async () => { await act(async () => root.unmount()); Object.assign(globalThis, originals); dom.window.close(); } };
 }
-const buttons = () => [...document.querySelectorAll('#founders a, #founders button')].map((node) => node.textContent);
+const buttons = () => [...document.querySelectorAll('#founders a, #founders button:not([disabled])')].map((node) => node.textContent);
 const founders = (remaining) => ({ capacity: 100, allocated: 100 - remaining, remaining, available: remaining > 0 });
 
 test('signed-out visitors see the promotion with the server slot count and Register/Login', async () => {
@@ -51,13 +51,34 @@ test('signed-in customers can claim; checkout is requested server-side for the f
   } finally { await cleanup(); }
 });
 
-test('after slots run out the offer becomes RM29/month for the All Apps Bundle', async () => {
-  const { cleanup, calls } = await mount((body) => Response.json(body.action === 'founders' ? founders(0) : signedIn()));
+test('after slots run out the offer is RM29/month for ONE selected app', async () => {
+  const { cleanup, calls } = await mount((body) => Response.json(body.action === 'founders' ? founders(0) : signedIn({ products: { ...states, opsp: 'active' } })));
   try {
     assert.equal(buttons()[0], 'Subscribe — RM29/month');
     assert.equal(document.querySelector('.founders-count strong').textContent, '0');
-    await act(async () => { document.querySelector('#founders button').click(); });
-    assert.equal(calls.find((c) => c.action === 'checkout').plan, 'all_apps_monthly');
+    // Apps already held are not offered; only apps with no access are selectable.
+    assert.deepEqual([...document.querySelectorAll('#founders option')].map((o) => o.value), ['opsfinance', 'opsflow']);
+    const select = document.querySelector('#founders select');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(document.defaultView.HTMLSelectElement.prototype, 'value').set.call(select, 'opsflow');
+      select.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+    });
+    await act(async () => { document.querySelector('#founders button:not([disabled])').click(); });
+    assert.deepEqual(calls.find((c) => c.action === 'checkout'), { action: 'checkout', plan: 'single_app_monthly', product: 'opsflow' });
+  } finally { await cleanup(); }
+});
+
+test('proposed plans are listed with disabled buttons and cannot be bought', async () => {
+  const { cleanup, calls } = await mount((body) => Response.json(body.action === 'founders' ? founders(0) : signedIn()));
+  try {
+    const text = document.querySelector('.founders-proposed').textContent;
+    for (const expected of ['RM49/month', 'RM79/month', 'Up to 5 users', 'Up to 20 users', 'Enterprise']) assert.match(text, new RegExp(expected));
+    const proposed = [...document.querySelectorAll('.founders-proposed button')];
+    assert.equal(proposed.length, 5);
+    assert.ok(proposed.every((b) => b.disabled));
+    proposed.forEach((b) => b.click());
+    assert.equal(calls.filter((c) => c.action === 'checkout').length, 0);
+    assert.match(document.querySelector('#founders').textContent, /pending owner approval/);
   } finally { await cleanup(); }
 });
 

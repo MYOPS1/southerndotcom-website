@@ -1,4 +1,4 @@
--- MYOPS Phase 3: Founders 100 lifetime entitlement + All Apps monthly bundle.
+-- MYOPS Phase 3: Founders 100 lifetime entitlement + RM29/month single-app plan.
 -- PROPOSAL ONLY. Deliberately outside supabase/migrations so no runner applies it.
 -- Do NOT execute on any Supabase project until it has had security review and owner
 -- approval, and then staging only. Depends on the Phase 2A foundation migration
@@ -18,18 +18,43 @@
 --    references, and EXECUTE granted to service_role only. Clients get no table writes.
 begin;
 
--- FIX for Phase 2A: myops_product_or_bundle is inverted ((slug is null) <> bundle) so a bundle
--- row can never be inserted. A bundle must have NO product slug; a product row must have one.
+-- FIX for Phase 2A: myops_product_or_bundle is inverted ((slug is null) <> bundle), so NO subscription
+-- row (per-app or bundle) can be inserted. A bundle has no product slug; a per-app row must have one.
 alter table public.myops_subscriptions drop constraint if exists myops_product_or_bundle;
 alter table public.myops_subscriptions add constraint myops_product_or_bundle
   check ((product_slug is null) = is_complete_bundle);
+
+-- Plan catalog. Only the two plans marked enabled can be purchased. The rest are PROPOSED
+-- and stay disabled until the owner approves them (flip `enabled` in a reviewed change).
+create table if not exists public.myops_plans (
+  code text primary key,
+  audience text not null check (audience in ('individual','business')),
+  price_cents integer check (price_cents > 0),
+  billing text not null check (billing in ('once','monthly','custom')),
+  app_limit integer check (app_limit > 0),
+  seat_limit integer check (seat_limit > 0),
+  enabled boolean not null default false,
+  constraint myops_plan_enabled_needs_price check (not enabled or price_cents is not null)
+);
+insert into public.myops_plans (code, audience, price_cents, billing, app_limit, seat_limit, enabled) values
+  ('founders_lifetime', 'individual', 2900, 'once',    null, null, true),
+  ('single_app_monthly','individual', 2900, 'monthly', 1,    null, true),
+  ('two_app_monthly',   'individual', 4900, 'monthly', 2,    null, false),
+  ('all_apps_monthly',  'individual', 7900, 'monthly', null, null, false),
+  ('business_basic',    'business',   null, 'monthly', null, 5,    false),
+  ('business_pro',      'business',   null, 'monthly', null, 20,   false),
+  ('enterprise',        'business',   null, 'custom',  null, null, false)
+on conflict (code) do nothing;
+alter table public.myops_plans enable row level security;
+revoke all on public.myops_plans from public, anon, authenticated;
 
 create table if not exists public.myops_payments (
   id uuid primary key default gen_random_uuid(),
   order_ref text not null unique check (order_ref ~ '^MYOPS-[A-Za-z0-9_-]{8,64}$'),
   user_id uuid not null references auth.users(id),
-  plan text not null check (plan in ('founders_lifetime','all_apps_monthly')),
-  amount_cents integer not null check (amount_cents = 2900),
+  plan text not null references public.myops_plans(code),
+  product_slug text references public.myops_products(slug),
+  amount_cents integer not null check (amount_cents > 0),
   currency text not null default 'MYR' check (currency = 'MYR'),
   gateway text not null default 'toyyibpay_sandbox' check (gateway = 'toyyibpay_sandbox'),
   gateway_bill_code text unique check (gateway_bill_code ~ '^[A-Za-z0-9]{4,32}$'),
@@ -37,17 +62,18 @@ create table if not exists public.myops_payments (
   status text not null default 'pending'
     check (status in ('pending','succeeded','failed','canceled','expired')),
   outcome text check (outcome in ('founder_allocated','subscription_granted',
-    'founder_slots_exhausted','duplicate_claim_review')),
+    'founder_late_refund_review','duplicate_claim_review')),
   reserved_until timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   confirmed_at timestamptz,
   constraint myops_payment_reservation check (reserved_until is null or plan = 'founders_lifetime'),
+  constraint myops_payment_product check ((plan = 'single_app_monthly') = (product_slug is not null)),
   constraint myops_payment_outcome check ((status = 'succeeded') = (outcome is not null))
 );
--- One open checkout per customer and plan: prevents duplicate claims by repeated clicks.
+-- One open checkout per customer, plan and app: prevents duplicate payments by repeated clicks.
 create unique index if not exists myops_one_pending_payment
-  on public.myops_payments (user_id, plan) where status = 'pending';
+  on public.myops_payments (user_id, plan, coalesce(product_slug, '')) where status = 'pending';
 
 create table if not exists public.myops_founder_allocations (
   slot_number integer primary key check (slot_number between 1 and 100),
@@ -96,20 +122,36 @@ drop policy if exists myops_lifetime_self_read on public.myops_lifetime_entitlem
 create policy myops_lifetime_self_read on public.myops_lifetime_entitlements
   for select to authenticated using (user_id = (select auth.uid()) and status = 'active');
 
--- Internal helper: add one month of the All Apps bundle (manual renewal), extending an
--- existing active bundle rather than creating a parallel one.
-create or replace function public.myops_grant_month(p_user_id uuid, p_ref text)
+-- Internal helper: add one month for exactly ONE application (manual renewal), extending an
+-- existing active subscription for that app. Never creates a bundle/all-app subscription.
+create or replace function public.myops_grant_month(p_user_id uuid, p_product_slug text, p_ref text)
 returns void language plpgsql security definer set search_path = '' as $$
 begin
+  if p_product_slug is null then raise exception 'product required' using errcode = '22023'; end if;
   update public.myops_subscriptions
      set current_period_end = greatest(coalesce(current_period_end, now()), now()) + interval '1 month',
          gateway_reference = p_ref
-   where personal_user_id = p_user_id and is_complete_bundle and status = 'active';
+   where personal_user_id = p_user_id and product_slug = p_product_slug
+     and not is_complete_bundle and status = 'active';
   if not found then
     insert into public.myops_subscriptions
-      (personal_user_id, is_complete_bundle, status, renewal_mode, current_period_end, gateway_reference)
-    values (p_user_id, true, 'active', 'manual', now() + interval '1 month', p_ref);
+      (personal_user_id, product_slug, is_complete_bundle, status, renewal_mode, current_period_end, gateway_reference)
+    values (p_user_id, p_product_slug, false, 'active', 'manual', now() + interval '1 month', p_ref);
   end if;
+end $$;
+
+-- Server-owned account type. Written only by service_role (never from user-editable auth
+-- metadata) and insert-only: an existing profile's type is never changed by this function.
+create or replace function public.myops_provision_profile(p_user_id uuid, p_display_name text, p_account_type text)
+returns boolean language plpgsql security definer set search_path = '' as $$
+begin
+  if p_account_type not in ('personal','business') then
+    raise exception 'invalid account type' using errcode = '22023';
+  end if;
+  insert into public.myops_profiles (user_id, display_name, account_type)
+  values (p_user_id, left(p_display_name, 120), p_account_type)
+  on conflict (user_id) do nothing;
+  return found;
 end $$;
 
 create or replace function public.myops_founders_status()
@@ -124,16 +166,28 @@ begin
 end $$;
 
 create or replace function public.myops_create_payment(
-  p_user_id uuid, p_plan text, p_order_ref text, p_reservation_minutes integer default 30)
+  p_user_id uuid, p_plan text, p_product_slug text, p_order_ref text, p_reservation_minutes integer default 30)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare v_alloc integer; v_res integer; v_existing public.myops_payments;
+declare v_alloc integer; v_res integer; v_existing public.myops_payments; v_plan public.myops_plans;
 begin
-  if p_plan not in ('founders_lifetime','all_apps_monthly') then
-    raise exception 'invalid plan' using errcode = '22023';
-  end if;
   perform pg_advisory_xact_lock(730500100);
+  select * into v_plan from public.myops_plans where code = p_plan;
+  if not found then raise exception 'invalid plan' using errcode = '22023'; end if;
+  -- Proposed plans (two-app, all-app, Business) are disabled until the owner approves them.
+  if not v_plan.enabled then return jsonb_build_object('status', 'plan_disabled'); end if;
   if not exists (select 1 from auth.users where id = p_user_id and email_confirmed_at is not null) then
     return jsonb_build_object('status', 'unconfirmed_user');
+  end if;
+  -- Eligibility uses the server-owned profile, never user-editable auth metadata.
+  if not exists (select 1 from public.myops_profiles where user_id = p_user_id and account_type = 'personal') then
+    return jsonb_build_object('status', 'not_eligible');
+  end if;
+  if (p_plan = 'single_app_monthly') <> (p_product_slug is not null) then
+    raise exception 'invalid product' using errcode = '22023';
+  end if;
+  if p_product_slug is not null and not exists (
+       select 1 from public.myops_products where slug = p_product_slug and launch_status = 'live') then
+    return jsonb_build_object('status', 'invalid_product');
   end if;
   if exists (select 1 from public.myops_lifetime_entitlements where user_id = p_user_id and status = 'active')
      or exists (select 1 from public.myops_founder_allocations where user_id = p_user_id) then
@@ -145,10 +199,11 @@ begin
      and ((reserved_until is not null and reserved_until <= now())
           or (reserved_until is null and created_at < now() - interval '24 hours'));
   select * into v_existing from public.myops_payments
-   where user_id = p_user_id and plan = p_plan and status = 'pending';
+   where user_id = p_user_id and plan = p_plan and coalesce(product_slug, '') = coalesce(p_product_slug, '')
+     and status = 'pending';
   if found then
     return jsonb_build_object('status', 'existing', 'order_ref', v_existing.order_ref,
-      'bill_code', v_existing.gateway_bill_code);
+      'bill_code', v_existing.gateway_bill_code, 'amount_cents', v_existing.amount_cents);
   end if;
   select count(*) into v_alloc from public.myops_founder_allocations;
   select count(*) into v_res from public.myops_payments
@@ -158,15 +213,15 @@ begin
       return jsonb_build_object('status', case when v_alloc >= 100 then 'sold_out' else 'reserved_out' end);
     end if;
     insert into public.myops_payments (order_ref, user_id, plan, amount_cents, reserved_until)
-    values (p_order_ref, p_user_id, p_plan, 2900,
+    values (p_order_ref, p_user_id, p_plan, v_plan.price_cents,
             now() + make_interval(mins => least(greatest(p_reservation_minutes, 5), 60)));
   else
-    -- The monthly bundle is offered only from customer 101 onward.
+    -- The RM29/month single-app plan is offered only from customer 101 onward.
     if v_alloc < 100 then return jsonb_build_object('status', 'founders_available'); end if;
-    insert into public.myops_payments (order_ref, user_id, plan, amount_cents)
-    values (p_order_ref, p_user_id, p_plan, 2900);
+    insert into public.myops_payments (order_ref, user_id, plan, product_slug, amount_cents)
+    values (p_order_ref, p_user_id, p_plan, p_product_slug, v_plan.price_cents);
   end if;
-  return jsonb_build_object('status', 'created', 'order_ref', p_order_ref);
+  return jsonb_build_object('status', 'created', 'order_ref', p_order_ref, 'amount_cents', v_plan.price_cents);
 end $$;
 
 create or replace function public.myops_attach_bill(p_order_ref text, p_bill_code text)
@@ -243,12 +298,12 @@ begin
         values (v_pay.user_id, 'all_apps', 'founders_100', v_pay.id);
         v_outcome := 'founder_allocated';
       else
-        -- Paid after slots ran out: the RM29 buys one month of the bundle instead.
-        perform public.myops_grant_month(v_pay.user_id, p_txn_ref);
-        v_outcome := 'founder_slots_exhausted';
+        -- Paid after the places ran out: record the money as received but grant NOTHING.
+        -- Staff refund it or review it manually; it is never converted into a subscription.
+        v_outcome := 'founder_late_refund_review';
       end if;
     else
-      perform public.myops_grant_month(v_pay.user_id, p_txn_ref);
+      perform public.myops_grant_month(v_pay.user_id, v_pay.product_slug, p_txn_ref);
       v_outcome := 'subscription_granted';
     end if;
     update public.myops_payments
@@ -270,7 +325,7 @@ begin
   return jsonb_build_object(
     'founders', public.myops_founders_status(),
     'payments', coalesce((select jsonb_agg(to_jsonb(x)) from (
-      select order_ref, user_id, plan, amount_cents, currency, status, outcome, gateway_bill_code,
+      select order_ref, user_id, plan, product_slug, amount_cents, currency, status, outcome, gateway_bill_code,
              gateway_txn_ref, reserved_until, created_at, confirmed_at
         from public.myops_payments order by created_at desc limit v_limit) x), '[]'::jsonb),
     'allocations', coalesce((select jsonb_agg(to_jsonb(x)) from (
@@ -284,13 +339,13 @@ begin
         from public.myops_payment_events order by last_seen_at desc limit v_limit) x), '[]'::jsonb));
 end $$;
 
-revoke all on function public.myops_grant_month(uuid, text),
-  public.myops_founders_status(), public.myops_create_payment(uuid, text, text, integer),
+revoke all on function public.myops_grant_month(uuid, text, text), public.myops_provision_profile(uuid, text, text),
+  public.myops_founders_status(), public.myops_create_payment(uuid, text, text, text, integer),
   public.myops_attach_bill(text, text), public.myops_abort_checkout(text),
   public.myops_get_payment(text),
   public.myops_settle_payment(text, text, text, integer, text, text),
   public.myops_admin_audit(integer) from public, anon, authenticated;
-grant execute on function public.myops_founders_status(), public.myops_create_payment(uuid, text, text, integer),
+grant execute on function public.myops_provision_profile(uuid, text, text), public.myops_founders_status(), public.myops_create_payment(uuid, text, text, text, integer),
   public.myops_attach_bill(text, text), public.myops_abort_checkout(text),
   public.myops_get_payment(text),
   public.myops_settle_payment(text, text, text, integer, text, text),

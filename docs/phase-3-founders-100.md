@@ -1,17 +1,21 @@
-# Phase 3 — Founders 100 lifetime promotion and All Apps bundle
+# Phase 3 — Founders 100 lifetime promotion and single-app subscriptions
 
 Status: **Preview and ToyyibPay sandbox only.** Nothing here has been applied to any Supabase
 project, deployed to Production, or connected to live payments.
 
-## Offer
+## Pricing
 
-| Customer | Price | Entitlement |
-| --- | --- | --- |
-| First 100 eligible paying Individual customers | RM29 once | Lifetime access to every live MYOPS app, including apps launched later |
-| Customer 101 onward | RM29 / month | All Apps Bundle (one month per confirmed payment, manual renewal) |
+| Plan | Price | Status | Entitlement |
+| --- | --- | --- | --- |
+| Founders 100 | RM29 once | **Enabled (sandbox)** | Lifetime access to every live MYOPS app, current and future; limited to 100 successful customers |
+| Single app | RM29 / month | **Enabled (sandbox), only after the 100 Founder places are taken** | ONE selected live app per payment; never grants other apps |
+| Two-app bundle | RM49 / month | Proposed, **disabled** pending owner approval | — |
+| All-app bundle | RM79 / month | Proposed, **disabled** pending owner approval | — |
+| Business Basic (5 users), Business Pro (20 users), Enterprise (custom) | not priced | Proposed, **disabled** pending owner approval | — |
 
-No free lifetimes exist: a lifetime row cannot be created without a `succeeded` payment row.
-Business pricing is separate and not implemented; `checkout` returns 403 for non-Individual accounts.
+Disabled plans exist in the `myops_plans` catalog with `enabled = false`; the server and
+`myops_create_payment` both refuse them (`plan_disabled`, HTTP 403). The homepage lists them with disabled
+buttons. No free lifetimes exist: a lifetime row cannot be created without a `succeeded` payment row.
 
 ## What was built
 
@@ -37,8 +41,10 @@ for one customer is impossible even if the lock were bypassed.
 - Only a payment the **server** settles as `succeeded` allocates a slot and creates the lifetime entitlement.
 - Settlement is idempotent. `succeeded` is terminal: later failure/cancel/replay never revokes or re-grants.
 - Amount or bill-code mismatch grants nothing.
-- Money received after slots ran out buys **one month** of the bundle (`founder_slots_exhausted`).
-  **Owner decision needed**: alternative is refund. A duplicate claim is flagged `duplicate_claim_review`.
+- A Founder payment confirmed after the places ran out is recorded as `succeeded` with outcome
+  `founder_late_refund_review`: **no lifetime and no subscription is granted**. It is shown in the admin audit
+  for refund or manual review and is never converted to monthly. A duplicate claim is flagged
+  `duplicate_claim_review`.
 
 Local verification (throwaway PostgreSQL 16, never Supabase): 150 concurrent customers → exactly 100
 reservations/slots (1–100, distinct), 12 concurrent duplicate webhooks → one settlement, 8 concurrent
@@ -68,10 +74,20 @@ Security review note: a success callback without a `hash` is currently accepted 
 independently confirmed through `getBillTransactions`. Once the sandbox hash formula is verified, make the
 hash mandatory for every status (defence in depth).
 
+## Eligibility: server-owned account type
+
+Checkout eligibility (Individual only) is decided inside `myops_create_payment` from `public.myops_profiles`,
+which only `service_role` can write. Registration provisions the profile through
+`myops_provision_profile` (insert-only; an existing type is never changed, and no row is created for
+existing-email probes). User-editable auth metadata is **not** consulted, so editing it cannot bypass
+eligibility. Accounts with no profile (including those registered before this change) are refused
+(`not_eligible`) until an operator provisions them.
+
 ## Server-side enforcement
 
 The browser never decides access. `launch` re-reads entitlements with the user's JWT (RLS) and requires
-`active`; lifetime applies to every `live` catalog app; coming-soon apps are never unlocked. Slugs are
+`active` **for the selected app**. A single-app subscription row carries one `product_slug` and unlocks only that
+app; `myops_grant_month` can never create a bundle row; lifetime applies to every `live` catalog app; coming-soon apps are never unlocked. Slugs are
 validated (`^[a-z0-9_]{1,32}$`) before building the `MYOPS_APP_URL_<SLUG>` lookup.
 
 ## Admin audit
@@ -86,11 +102,11 @@ Order, staging project only, **after security review and written owner approval*
 
 1. Phase 2A foundation (`supabase/migrations/202610160001_myops_identity_foundation.sql`) — still unapplied.
 2. `supabase/proposals/phase3_founders_100.sql`. It also **corrects a Phase 2A bug**: the
-   `myops_product_or_bundle` check was inverted, which made every bundle subscription row impossible to insert.
+   `myops_product_or_bundle` check was inverted, which made every subscription row (per-app and bundle) impossible to insert.
 
-Rollback (staging, after exporting data because these are financial records): drop the four tables
-(`myops_payment_events`, `myops_lifetime_entitlements`, `myops_founder_allocations`, `myops_payments`) and
-the eight `myops_*` functions; restore the original constraint only if a bundle row is not needed.
+Rollback (staging, after exporting data because these are financial records): drop the five tables
+(`myops_payment_events`, `myops_lifetime_entitlements`, `myops_founder_allocations`, `myops_payments`,
+`myops_plans`) and the `myops_*` functions; restore the original constraint only if a bundle row is not needed.
 
 ### Security review checklist
 - [ ] `SECURITY DEFINER` functions: `search_path=''`, schema-qualified, `EXECUTE` only for `service_role`.
@@ -98,6 +114,8 @@ the eight `myops_*` functions; restore the original constraint only if a bundle 
 - [ ] Advisory-lock key does not collide with other uses.
 - [ ] Constraint correction to `myops_product_or_bundle` approved.
 - [ ] Approve use of a server-only service-role key (see below).
+- [ ] Approve plan catalog prices/limits and that all proposed plans remain `enabled = false`.
+- [ ] Approve `myops_provision_profile` (insert-only, service_role) as the source of account type.
 
 ## Environment (Preview only; never commit values)
 
@@ -115,10 +133,10 @@ the eight `myops_*` functions; restore the original constraint only if a bundle 
 - Sandbox credentials and Preview variables not set; webhook and checkout untested against real ToyyibPay.
 - Vercel Deployment Protection on Previews will block the webhook; needs a protection-bypass for
   `/api/toyyibpay-callback` (or a non-protected domain).
-- **Individual-only is weak**: account type is user-editable auth metadata until server-owned profile
-  provisioning (PR #8, unapproved) exists. A Business user could edit metadata to buy as Individual.
-- Founder-slots-exhausted policy (one month vs refund) needs a decision.
+- Existing users without a `myops_profiles` row cannot buy until a profile is provisioned (backfill is a
+  separate, unapproved data operation).
+- Late Founder payments need a manual refund process (none exists; ToyyibPay refunds are done by staff).
 - No refund/revocation workflow (revocation is a manual, audited SQL operation today).
-- Monthly plan is a manual-renewal single-month payment, not auto-billing.
+- Single-app plan is a manual-renewal one-month payment per app, not auto-billing.
 - Admin audit lists only the most recent 200 rows per table.
 - Lifetime entitlement applies to this site's launch gate; cross-app SSO is not implemented.

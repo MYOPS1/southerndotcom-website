@@ -2,8 +2,10 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 // Sandbox only. The host is a constant so live ToyyibPay cannot be reached by configuration.
 const SANDBOX = 'https://dev.toyyibpay.com';
-const PRICE_CENTS = 2900;
-const PLANS = ['founders_lifetime', 'all_apps_monthly'];
+// Only these plans can be purchased. Two-app (RM49), all-app (RM79) and Business plans are
+// proposed and stay disabled here and in the database until the owner approves them.
+const PLANS = ['founders_lifetime', 'single_app_monthly'];
+const SLUG = /^[a-z0-9_]{1,32}$/;
 const REF = /^MYOPS-[A-Za-z0-9_-]{8,64}$/;
 const BILL = /^[A-Za-z0-9]{4,32}$/;
 const SAFE_TEXT = /^[A-Za-z0-9._:@ -]{1,64}$/;
@@ -46,15 +48,15 @@ export function createPayments({ env, transport, adminFactory, project }) {
     return response.json();
   }
 
-  async function createBill({ orderRef, origin }) {
+  async function createBill({ orderRef, origin, cents, name }) {
     const result = await gatewayForm('createBill', {
       userSecretKey: env.TOYYIBPAY_SANDBOX_SECRET_KEY,
       categoryCode: env.TOYYIBPAY_SANDBOX_CATEGORY_CODE,
-      billName: 'MYOPS All Apps',
-      billDescription: 'MYOPS All Apps access (sandbox)',
+      billName: name,
+      billDescription: `${name} (sandbox)`,
       billPriceSetting: '1',
       billPayorInfo: '0',
-      billAmount: String(PRICE_CENTS),
+      billAmount: String(cents),
       billReturnUrl: `${origin}/?payment=return`,
       billCallbackUrl: `${origin}/api/toyyibpay-callback`,
       billExternalReferenceNo: orderRef,
@@ -81,6 +83,16 @@ export function createPayments({ env, transport, adminFactory, project }) {
     return { cents, ref };
   }
 
+  // Insert-only server-owned profile; failure never blocks signup and never edits an existing type.
+  async function provisionProfile({ userId, displayName, accountType }) {
+    const client = admin();
+    if (!client || typeof userId !== 'string') return false;
+    try {
+      await rpc(client, 'myops_provision_profile', { p_user_id: userId, p_display_name: displayName, p_account_type: accountType });
+      return true;
+    } catch { return false; }
+  }
+
   async function founders() {
     const client = admin();
     if (!client) return { available: false };
@@ -88,25 +100,34 @@ export function createPayments({ env, transport, adminFactory, project }) {
     return { capacity: status.capacity, allocated: status.allocated, remaining: status.remaining, available: status.remaining > 0 };
   }
 
-  async function checkout({ userId, plan, origin }) {
+  async function checkout({ userId, plan, product, origin }) {
     const client = admin();
     if (!client || !gatewayConfigured()) return { status: 503, body: { error: 'Sandbox checkout is not configured for this Preview.' } };
-    if (!PLANS.includes(plan)) return { status: 400, body: { error: 'Unknown plan.' } };
+    if (!PLANS.includes(plan)) return { status: 403, body: { error: 'This plan is not available yet.' } };
+    if ((plan === 'single_app_monthly') !== (product !== undefined && product !== null)
+        || (product !== undefined && product !== null && !(typeof product === 'string' && SLUG.test(product)))) {
+      return { status: 400, body: { error: plan === 'single_app_monthly' ? 'Select one application.' : 'Invalid request.' } };
+    }
     const ref = `MYOPS-${randomBytes(12).toString('base64url')}`;
-    const created = await rpc(client, 'myops_create_payment', { p_user_id: userId, p_plan: plan, p_order_ref: ref, p_reservation_minutes: 30 });
+    const created = await rpc(client, 'myops_create_payment', { p_user_id: userId, p_plan: plan, p_product_slug: product ?? null, p_order_ref: ref, p_reservation_minutes: 30 });
     const refused = {
       unconfirmed_user: [403, 'Confirm your email before purchasing.'],
       already_lifetime: [409, 'You already have lifetime access.'],
       sold_out: [409, 'All Founders 100 places are taken.'],
       reserved_out: [409, 'Remaining Founders 100 places are temporarily reserved. Try again shortly.'],
       founders_available: [409, 'Founders 100 places are still available.'],
+      not_eligible: [403, 'Founders 100 and single-app plans are available to verified Individual accounts only.'],
+      plan_disabled: [403, 'This plan is not available yet.'],
+      invalid_product: [400, 'Select an available application.'],
     }[created.status];
     if (refused) return { status: refused[0], body: { error: refused[1] } };
-    if (!['created', 'existing'].includes(created.status) || !REF.test(created.order_ref || '')) throw new Error('rpc_shape');
+    if (!['created', 'existing'].includes(created.status) || !REF.test(created.order_ref || '')
+        || !Number.isInteger(created.amount_cents) || created.amount_cents <= 0) throw new Error('rpc_shape');
     let billCode = created.bill_code;
     if (!billCode) {
       try {
-        billCode = await createBill({ orderRef: created.order_ref, origin });
+        billCode = await createBill({ orderRef: created.order_ref, origin, cents: created.amount_cents,
+          name: plan === 'founders_lifetime' ? 'MYOPS Founders 100' : 'MYOPS single app' });
       } catch {
         await rpc(client, 'myops_abort_checkout', { p_order_ref: created.order_ref });
         return { status: 502, body: { error: 'Payment gateway is unavailable. Try again later.' } };
@@ -175,5 +196,5 @@ export function createPayments({ env, transport, adminFactory, project }) {
     return { status: ok ? 200 : 400, body: { status: result.status } };
   }
 
-  return { founders, checkout, audit, callback };
+  return { founders, checkout, audit, callback, provisionProfile };
 }

@@ -174,6 +174,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const validEmail = typeof body.email === 'string' && body.email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email);
       const validPassword = typeof body.password === 'string' && body.password.length >= 12 && body.password.length <= 128;
       const callback = `${origin}/auth/callback`;
+      const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
       if (action === 'register') {
         if (!validEmail || !validPassword || !['personal', 'business'].includes(body.accountType)
             || typeof body.displayName !== 'string' || body.displayName.trim().length < 1 || body.displayName.length > 120) {
@@ -182,6 +183,9 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         // Metadata is descriptive only. Never trust it for roles or authorization.
         const { data, error } = await client.auth.signUp({ email: body.email, password: body.password,
           options: { emailRedirectTo: callback, data: { display_name: body.displayName.trim(), account_type: body.accountType } } });
+        if (!error && data?.user?.id && data.user.identities?.length > 0) {
+          await payments.provisionProfile({ userId: data.user.id, displayName: body.displayName.trim(), accountType: body.accountType });
+        }
         if (error) {
           const entry = {
             event: 'myops_signup_error',
@@ -237,7 +241,6 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         clearAll();
         return reply(200, { next: '/' });
       }
-      const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
       if (action === 'founders') return reply(200, await payments.founders());
       if (!['account', 'reset', 'profile', 'session', 'launch', 'checkout', 'admin_audit'].includes(action)) return reply(400, { error: 'Unknown operation.' });
       const active = saved[SESSION] && activityValid(secret, saved[ACTIVITY], now());
@@ -256,11 +259,9 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         return reply(200, { signedIn: true, email: identity.user.email, products: entitlements?.products ?? null, lifetime: entitlements?.lifetime ?? false });
       }
       if (action === 'checkout') {
-        // Founders 100 is scoped to Individual accounts until Business pricing is approved.
-        if (profileFrom(identity.user)?.account_type !== 'personal') {
-          return reply(403, { error: 'Founders 100 and All Apps checkout are available to Individual accounts only.' });
-        }
-        const result = await payments.checkout({ userId: identity.user.id, plan: body.plan, origin });
+        // Eligibility (Individual-only) is decided inside the database from the server-owned
+        // profile; user-editable auth metadata is never consulted.
+        const result = await payments.checkout({ userId: identity.user.id, plan: body.plan, product: body.product, origin });
         return reply(result.status, result.body);
       }
       if (action === 'admin_audit') {

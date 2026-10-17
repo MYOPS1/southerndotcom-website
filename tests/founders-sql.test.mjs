@@ -28,15 +28,16 @@ const call = async (query) => JSON.parse(await svc(query));
 const q = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
 let counter = 0;
-async function newUser({ confirmed = true } = {}) {
+async function newUser({ confirmed = true, type = 'personal' } = {}) {
   const id = (await sql(`insert into auth.users (email, email_confirmed_at) values ('u${++counter}@example.test', ${confirmed ? 'now()' : 'null'}) returning id`)).split('\n')[0];
+  if (type) await svc(`select public.myops_provision_profile(${q(id)}, 'Test', ${q(type)})`);
   return id;
 }
 const order = () => `MYOPS-test-${String(++counter).padStart(6, '0')}${Math.random().toString(36).slice(2, 8)}`;
 const bill = () => `b${Math.random().toString(36).slice(2, 10)}`;
-async function checkout(user, plan = 'founders_lifetime') {
+async function checkout(user, plan = 'founders_lifetime', product = plan === 'single_app_monthly' ? 'opsp' : null) {
   const ref = order();
-  const result = await call(`select public.myops_create_payment(${q(user)}, ${q(plan)}, ${q(ref)})`);
+  const result = await call(`select public.myops_create_payment(${q(user)}, ${q(plan)}, ${product ? q(product) : 'null'}, ${q(ref)})`);
   if (result.status === 'created') {
     const code = bill();
     assert.equal(await svc(`select public.myops_attach_bill(${q(ref)}, ${q(code)})`), 't');
@@ -70,7 +71,7 @@ before(async () => {
   // Supabase grants service_role BYPASSRLS; the stub cluster must match.
   await sql('alter role service_role bypassrls; grant execute on all functions in schema public to service_role');
   await sql('revoke execute on all functions in schema public from public, anon, authenticated');
-  await sql('grant execute on function public.myops_founders_status(), public.myops_create_payment(uuid,text,text,integer), public.myops_attach_bill(text,text), public.myops_abort_checkout(text), public.myops_get_payment(text), public.myops_settle_payment(text,text,text,integer,text,text), public.myops_admin_audit(integer) to service_role');
+  await sql('grant execute on function public.myops_founders_status(), public.myops_create_payment(uuid,text,text,text,integer), public.myops_provision_profile(uuid,text,text), public.myops_attach_bill(text,text), public.myops_abort_checkout(text), public.myops_get_payment(text), public.myops_settle_payment(text,text,text,integer,text,text), public.myops_admin_audit(integer) to service_role');
 });
 
 after(() => {
@@ -112,8 +113,8 @@ test('unconfirmed users, bad plans and the monthly plan while slots remain are r
   const unconfirmed = await newUser({ confirmed: false });
   assert.equal((await checkout(unconfirmed)).status, 'unconfirmed_user');
   const user = await newUser();
-  await assert.rejects(call(`select public.myops_create_payment(${q(user)}, 'free_forever', ${q(order())})`), /invalid plan/);
-  assert.equal((await checkout(user, 'all_apps_monthly')).status, 'founders_available');
+  await assert.rejects(call(`select public.myops_create_payment(${q(user)}, 'free_forever', null, ${q(order())})`), /invalid plan/);
+  assert.equal((await checkout(user, 'single_app_monthly')).status, 'founders_available');
 });
 
 test('duplicate and concurrent checkout clicks reuse one pending payment and one reservation', { skip }, async () => {
@@ -143,7 +144,7 @@ test('abort of a checkout whose gateway bill failed releases the slot', { skip }
   const user = await newUser();
   const before = await status();
   const ref = order();
-  assert.equal((await call(`select public.myops_create_payment(${q(user)}, 'founders_lifetime', ${q(ref)})`)).status, 'created');
+  assert.equal((await call(`select public.myops_create_payment(${q(user)}, 'founders_lifetime', null, ${q(ref)})`)).status, 'created');
   assert.equal(await svc(`select public.myops_abort_checkout(${q(ref)})`), 't');
   assert.deepEqual(await status(), before);
 });
@@ -193,32 +194,80 @@ test('150 concurrent customers: exactly 100 reservations, 100 distinct slots, no
   await assert.rejects(sql(`insert into public.myops_founder_allocations (slot_number, user_id, payment_id) values (101, ${q(next)}, gen_random_uuid())`), /violates check constraint/);
 });
 
-test('after 100: monthly bundle is offered, grants one month once, and renewals extend it', { skip }, async () => {
+test('after 100: RM29/month covers exactly ONE app, once per payment, and renewals extend it', { skip }, async () => {
   const user = await newUser();
-  const p = await checkout(user, 'all_apps_monthly');
+  const p = await checkout(user, 'single_app_monthly', 'opsp');
   assert.equal(p.status, 'created');
+  assert.equal(p.amount_cents, 2900);
   const results = await Promise.all(Array.from({ length: 5 }, () => settle(p, 'succeeded', { event: `m-${p.ref}` })));
   assert.equal(results.filter((r) => r.status === 'settled').length, 1);
-  assert.equal(await svc(`select count(*) from public.myops_subscriptions where personal_user_id = ${q(user)} and is_complete_bundle and status = 'active'`), '1');
+  assert.equal(await svc(`select count(*) from public.myops_subscriptions where personal_user_id = ${q(user)} and product_slug = 'opsp' and not is_complete_bundle and status = 'active'`), '1');
+  // Never an all-app grant: no bundle row, no lifetime entitlement, no other app.
+  assert.equal(await svc(`select count(*) from public.myops_subscriptions where personal_user_id = ${q(user)} and (is_complete_bundle or product_slug <> 'opsp')`), '0');
   assert.equal(await svc(`select count(*) from public.myops_lifetime_entitlements where user_id = ${q(user)}`), '0');
   const first = await svc(`select current_period_end from public.myops_subscriptions where personal_user_id = ${q(user)}`);
-  const again = await checkout(user, 'all_apps_monthly');
-  await settle(again);
+  await settle(await checkout(user, 'single_app_monthly', 'opsp'));
   assert.equal(await svc(`select count(*) from public.myops_subscriptions where personal_user_id = ${q(user)}`), '1');
   assert.equal(await svc(`select current_period_end > ${q(first)}::timestamptz from public.myops_subscriptions where personal_user_id = ${q(user)}`), 't');
+  // A second app is a separate payment and a separate subscription.
+  await settle(await checkout(user, 'single_app_monthly', 'opsfinance'));
+  assert.equal(await svc(`select string_agg(product_slug, ',' order by product_slug) from public.myops_subscriptions where personal_user_id = ${q(user)}`), 'opsfinance,opsp');
 });
 
-test('payment confirmed after the founder slots are gone buys one month, never a lifetime', { skip }, async () => {
-  // Fresh cluster state is full (100 allocated). Backdate a pending founder payment's reservation.
+test('duplicate single-app checkouts for the same app reuse one pending payment', { skip }, async () => {
+  const user = await newUser();
+  const results = await Promise.all(Array.from({ length: 6 }, () => checkout(user, 'single_app_monthly', 'opsflow')));
+  assert.equal(results.filter((r) => r.status === 'created').length, 1);
+  assert.ok(results.filter((r) => r.status !== 'created').every((r) => r.status === 'existing'));
+});
+
+test('single-app needs a live catalog app; coming-soon and unknown apps are refused', { skip }, async () => {
+  const user = await newUser();
+  assert.equal((await checkout(user, 'single_app_monthly', 'opswms')).status, 'invalid_product');
+  assert.equal((await checkout(user, 'single_app_monthly', 'nope')).status, 'invalid_product');
+  await assert.rejects(checkout(user, 'single_app_monthly', null), /invalid product/);
+  await assert.rejects(checkout(user, 'founders_lifetime', 'opsp'), /invalid product/);
+});
+
+test('proposed plans (RM49 two-app, RM79 all-app, Business tiers) are disabled', { skip }, async () => {
+  const user = await newUser();
+  for (const plan of ['two_app_monthly', 'all_apps_monthly', 'business_basic', 'business_pro', 'enterprise']) {
+    assert.equal((await checkout(user, plan, null)).status, 'plan_disabled', plan);
+  }
+  assert.equal(await svc(`select string_agg(code || ':' || coalesce(price_cents::text, '-') || ':' || enabled, ',' order by code) from public.myops_plans`),
+    'all_apps_monthly:7900:false,business_basic:-:false,business_pro:-:false,enterprise:-:false,founders_lifetime:2900:true,single_app_monthly:2900:true,two_app_monthly:4900:false');
+  assert.equal(await svc(`select seat_limit from public.myops_plans where code = 'business_basic'`) + await svc(`select seat_limit from public.myops_plans where code = 'business_pro'`), '520');
+  await assert.rejects(sql(`update public.myops_plans set enabled = true where code = 'business_basic'`, { role: 'authenticated' }), /permission denied/);
+  await assert.rejects(sql(`update public.myops_plans set enabled = true where code = 'enterprise'`), /myops_plan_enabled_needs_price/);
+});
+
+test('eligibility is the server-owned profile: Business and unprovisioned accounts cannot buy', { skip }, async () => {
+  const business = await newUser({ type: 'business' });
+  const none = await newUser({ type: null });
+  assert.equal((await checkout(business)).status, 'not_eligible');
+  assert.equal((await checkout(none)).status, 'not_eligible');
+  // Insert-only: provisioning again cannot flip a Business profile to Individual.
+  assert.equal(await svc(`select public.myops_provision_profile(${q(business)}, 'X', 'personal')`), 'f');
+  assert.equal((await checkout(business)).status, 'not_eligible');
+  for (const role of ['anon', 'authenticated']) {
+    await assert.rejects(sql(`select public.myops_provision_profile(${q(none)}, 'X', 'personal')`, { role }), /permission denied/);
+    await sql(`update public.myops_profiles set account_type = 'personal' where user_id = ${q(business)}`, { role, sub: business }).catch(() => {});
+    assert.equal(await svc(`select account_type from public.myops_profiles where user_id = ${q(business)}`), 'business');
+  }
+});
+
+test('a founder payment confirmed after the places are gone is flagged for refund review, never converted', { skip }, async () => {
+  // Cluster is full (100 allocated). Backdate a pending founder payment's reservation.
   const user = await newUser();
   const ref = order(); const code = bill();
   await sql(`insert into public.myops_payments (order_ref, user_id, plan, amount_cents, reserved_until, gateway_bill_code) values (${q(ref)}, ${q(user)}, 'founders_lifetime', 2900, now() - interval '1 hour', ${q(code)})`);
   const result = await settle({ ref, code });
   assert.equal(result.status, 'settled');
-  assert.equal(result.outcome, 'founder_slots_exhausted');
+  assert.equal(result.outcome, 'founder_late_refund_review');
   assert.equal(await svc(`select count(*) from public.myops_lifetime_entitlements where user_id = ${q(user)}`), '0');
-  assert.equal(await svc(`select count(*) from public.myops_subscriptions where personal_user_id = ${q(user)} and is_complete_bundle`), '1');
+  assert.equal(await svc(`select count(*) from public.myops_subscriptions where personal_user_id = ${q(user)}`), '0');
   assert.equal((await status()).allocated, 100);
+  assert.ok((await call('select public.myops_admin_audit(500)')).payments.some((x) => x.order_ref === ref && x.outcome === 'founder_late_refund_review'));
 });
 
 test('admin audit returns payments, allocations, entitlements and events, bounded by limit', { skip }, async () => {

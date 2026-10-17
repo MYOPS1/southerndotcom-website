@@ -29,17 +29,20 @@ function userClient(user, rows = {}) {
 }
 
 // In-memory mirror of the SQL contract (the SQL itself is proven in founders-sql.test.mjs).
-function ledger({ cap = 100, allocated = 0 } = {}) {
-  const state = { payments: new Map(), alloc: new Set(), events: new Map(), calls: [], extra: allocated };
+function ledger({ cap = 100, allocated = 0, ineligible = ['biz', 'nobody'] } = {}) {
+  const state = { payments: new Map(), alloc: new Set(), events: new Map(), calls: [], extra: allocated, subs: [], provisioned: [] };
   const size = () => state.alloc.size + state.extra;
   const handlers = {
     myops_founders_status: () => ({ capacity: cap, allocated: size(), remaining: Math.max(0, cap - size()) }),
-    myops_create_payment: ({ p_user_id: user, p_plan: plan, p_order_ref: ref }) => {
+    myops_provision_profile: (a) => { state.provisioned.push(a); return true; },
+    myops_create_payment: ({ p_user_id: user, p_plan: plan, p_product_slug: product, p_order_ref: ref }) => {
+      if (ineligible.includes(user)) return { status: 'not_eligible' };
+      if (!['founders_lifetime', 'single_app_monthly'].includes(plan)) return { status: 'plan_disabled' };
       if (state.alloc.has(user)) return { status: 'already_lifetime' };
       if (plan === 'founders_lifetime' && size() >= cap) return { status: 'sold_out' };
-      if (plan === 'all_apps_monthly' && size() < cap) return { status: 'founders_available' };
-      state.payments.set(ref, { order_ref: ref, user_id: user, plan, status: 'pending', gateway_bill_code: null, amount_cents: 2900 });
-      return { status: 'created', order_ref: ref };
+      if (plan === 'single_app_monthly' && size() < cap) return { status: 'founders_available' };
+      state.payments.set(ref, { order_ref: ref, user_id: user, plan, product_slug: product, status: 'pending', gateway_bill_code: null, amount_cents: 2900 });
+      return { status: 'created', order_ref: ref, amount_cents: 2900 };
     },
     myops_attach_bill: ({ p_order_ref: ref, p_bill_code: code }) => { state.payments.get(ref).gateway_bill_code = code; return true; },
     myops_abort_checkout: ({ p_order_ref: ref }) => { state.payments.get(ref).status = 'failed'; return true; },
@@ -54,7 +57,8 @@ function ledger({ cap = 100, allocated = 0 } = {}) {
       if (a.p_outcome !== 'succeeded') { pay.status = a.p_outcome; return { status: a.p_outcome }; }
       if (a.p_amount_cents !== pay.amount_cents) return { status: 'amount_mismatch' };
       pay.status = 'succeeded';
-      if (size() < cap) { state.alloc.add(pay.user_id); pay.outcome = 'founder_allocated'; } else pay.outcome = 'founder_slots_exhausted';
+      if (pay.plan === 'single_app_monthly') { state.subs.push({ user: pay.user_id, product: pay.product_slug }); pay.outcome = 'subscription_granted'; }
+      else if (size() < cap) { state.alloc.add(pay.user_id); pay.outcome = 'founder_allocated'; } else pay.outcome = 'founder_late_refund_review';
       return { status: 'settled', outcome: pay.outcome };
     },
     myops_admin_audit: () => ({ founders: handlers.myops_founders_status(), payments: [], allocations: [], entitlements: [], events: [] }),
@@ -116,11 +120,18 @@ test('checkout requires a live signed-in session, an Individual account and sand
   assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { ledgerState: state, headers: { cookie: '' } })).code, 401);
   const stale = `__Host-myops-access=tok; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - 16 * 60 * 1000)}`;
   assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { ledgerState: state, headers: { cookie: stale } })).code, 401);
-  assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { user: person('biz', 'business'), ledgerState: state })).code, 403);
-  assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { user: { ...person(), user_metadata: {} }, ledgerState: state })).code, 403);
+  // Eligibility comes from the server-owned profile in the database, not auth metadata:
+  // editing metadata to 'personal' cannot help an account the server knows is Business.
+  const forged = await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { user: person('biz', 'personal'), ledgerState: state, transport: gateway().transport });
+  assert.equal(forged.code, 403);
+  assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { user: { ...person('nobody'), user_metadata: {} }, ledgerState: state, transport: gateway().transport })).code, 403);
+  // ...and metadata saying 'business' does not block an account the server knows is Individual.
+  assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { user: person('user-a', 'business'), ledgerState: state, transport: gateway().transport })).code, 200);
   assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { ledgerState: state, extraEnv: { TOYYIBPAY_SANDBOX_SECRET_KEY: '' } })).code, 503);
-  assert.equal((await authRun({ action: 'checkout', plan: 'free_forever' }, { ledgerState: state, transport: gateway().transport })).code, 400);
-  assert.deepEqual(state.calls.filter((c) => c === 'myops_create_payment'), []);
+  for (const plan of ['free_forever', 'two_app_monthly', 'all_apps_monthly', 'business_basic', 'business_pro', 'enterprise']) {
+    assert.equal((await authRun({ action: 'checkout', plan }, { ledgerState: state, transport: gateway().transport })).code, 403, plan);
+  }
+  assert.equal(state.calls.filter((c) => c === 'myops_create_payment').length, 3);
 });
 
 test('checkout creates a sandbox bill for RM29 and returns only the sandbox payment URL', async () => {
@@ -145,10 +156,14 @@ test('checkout failures: gateway error releases the reservation; sold out and du
   const full = ledger({ allocated: 100 });
   const soldOut = await authRun({ action: 'checkout', plan: 'founders_lifetime' }, { ledgerState: full, transport: gateway().transport });
   assert.equal(soldOut.code, 409);
-  const early = await authRun({ action: 'checkout', plan: 'all_apps_monthly' }, { ledgerState: ledger(), transport: gateway().transport });
+  const early = await authRun({ action: 'checkout', plan: 'single_app_monthly', product: 'opsp' }, { ledgerState: ledger(), transport: gateway().transport });
   assert.equal(early.code, 409);
-  const monthly = await authRun({ action: 'checkout', plan: 'all_apps_monthly' }, { ledgerState: full, transport: gateway().transport });
+  const monthly = await authRun({ action: 'checkout', plan: 'single_app_monthly', product: 'opsp' }, { ledgerState: full, transport: gateway().transport });
   assert.equal(monthly.code, 200);
+  for (const bad of [undefined, 'Bad Slug', 'opsp/../x', 7]) {
+    assert.equal((await authRun({ action: 'checkout', plan: 'single_app_monthly', product: bad }, { ledgerState: full, transport: gateway().transport })).code, 400);
+  }
+  assert.equal((await authRun({ action: 'checkout', plan: 'founders_lifetime', product: 'opsp' }, { transport: gateway().transport })).code, 400);
 });
 
 test('admin audit is closed to non-admins and when no admins are configured', async () => {
@@ -222,6 +237,45 @@ test('payment failure and cancellation need a valid hash and never grant access'
   assert.equal(state.alloc.size, 0);
 });
 
+test('single-app payment grants only that app and never a lifetime or bundle', async () => {
+  const state = ledger({ allocated: 100 });
+  const g0 = gateway();
+  await authRun({ action: 'checkout', plan: 'single_app_monthly', product: 'opsfinance' }, { ledgerState: state, transport: g0.transport });
+  const [order] = [...state.payments.keys()];
+  assert.equal(g0.requests[0].body.billAmount, '2900');
+  const done = await hook(callbackFields(order), { ledgerState: state, transport: gateway({ paid: [paidRow(order)] }).transport });
+  assert.equal(done.data.status, 'settled');
+  assert.deepEqual(state.subs, [{ user: 'user-a', product: 'opsfinance' }]);
+  assert.equal(state.alloc.size, 0);
+});
+
+test('entitlements: a single-app subscription never unlocks other apps', () => {
+  const sub = { personal_user_id: 'user-a', organization_id: null, product_slug: 'opsfinance', is_complete_bundle: false, status: 'active', current_period_end: new Date(NOW + 86400000).toISOString() };
+  const cat = [{ slug: 'opsp', launch_status: 'live' }, { slug: 'opsfinance', launch_status: 'live' }, { slug: 'opsflow', launch_status: 'live' }];
+  const states = resolveProductStates({ userId: 'user-a', catalog: cat, subscriptions: [sub], grants: [], lifetime: [], now: NOW });
+  assert.equal(states.opsfinance, 'active');
+  assert.equal(states.opsp, 'none');
+  assert.equal(states.opsflow, 'none');
+  const expired = resolveProductStates({ userId: 'user-a', catalog: cat, subscriptions: [{ ...sub, current_period_end: new Date(NOW - 1000).toISOString() }], grants: [], lifetime: [], now: NOW });
+  assert.equal(expired.opsfinance, 'none');
+});
+
+test('registration provisions the server-owned account type, insert-only, and never for existing-email probes', async () => {
+  const state = ledger();
+  const signUp = (identities) => ({ auth: { signUp: async () => ({ data: { user: { id: 'new-user', identities }, session: null }, error: null }) } });
+  const run = async (identities, accountType) => {
+    const res = { setHeader() {}, status(code) { this.code = code; return this; }, json(data) { this.data = data; return this; } };
+    const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin, 'content-type': 'application/json' },
+      body: { action: 'register', email: 'a@example.com', password: 'p'.repeat(14), accountType, displayName: 'Name' } };
+    await createAuthHandler({ env, clientFactory: (url, key) => (key.startsWith('sb_secret_') ? state.client : signUp(identities)), now: () => NOW })(req, res);
+    return res;
+  };
+  assert.equal((await run([{ id: 'i' }], 'business')).code, 200);
+  assert.deepEqual(state.provisioned, [{ p_user_id: 'new-user', p_display_name: 'Name', p_account_type: 'business' }]);
+  await run([], 'personal');
+  assert.equal(state.provisioned.length, 1);
+});
+
 test('slot exhaustion: the 101st payer is never given a lifetime', async () => {
   const state = ledger({ allocated: 99 });
   const a = await started('user-a', state);
@@ -232,8 +286,10 @@ test('slot exhaustion: the 101st payer is never given a lifetime', async () => {
   assert.equal(state.payments.get(a.order).outcome, 'founder_allocated');
   const late = await hook(callbackFields(b.order), { ledgerState: state, transport: g(b.order) });
   assert.equal(late.data.status, 'settled');
-  assert.equal(state.payments.get(b.order).outcome, 'founder_slots_exhausted');
+  // Late Founder money is flagged for refund/manual review: no lifetime and no monthly conversion.
+  assert.equal(state.payments.get(b.order).outcome, 'founder_late_refund_review');
   assert.equal(state.alloc.has('user-b'), false);
+  assert.deepEqual(state.subs, []);
   const next = await started('user-c', state);
   assert.equal(next.res.code, 409);
 });
