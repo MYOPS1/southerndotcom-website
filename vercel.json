@@ -1,12 +1,9 @@
 {
   "version": 2,
   "routes": [
-    {
-      "handle": "filesystem"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/index.html"
-    }
+    { "src": "/api/auth", "dest": "/api/auth" },
+    { "src": "/auth/callback", "headers": { "Referrer-Policy": "no-referrer", "Cache-Control": "no-store" }, "dest": "/index.html" },
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }
