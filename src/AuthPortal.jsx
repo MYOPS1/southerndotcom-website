@@ -20,6 +20,8 @@ async function request(action, fields = {}) {
   return result;
 }
 
+const productLabels = { opsp: 'OpsPS', opsfinance: 'OpsFinance', opsflow: 'OpsFlow', opswms: 'OpsWMS', opshr: 'OpsHR' };
+
 export function AuthPortal({ mode }) {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -81,15 +83,23 @@ export function AuthPortal({ mode }) {
         {mode === 'dashboard' && account && <>
           <p>Signed in as {account.email}</p>
           {account.profile && <p>{account.profile.display_name} · {account.profile.account_type === 'business' ? 'Business' : 'Personal'}</p>}
-          <p>Paid application launches are disabled until server-side entitlements are available.</p>
-          <div aria-label="Paid application launches">
-            <button type="button" className="btn btn-primary" disabled>OpsPS — unavailable</button>{' '}
-            <button type="button" className="btn btn-primary" disabled>OpsFinance — unavailable</button>{' '}
-            <button type="button" className="btn btn-primary" disabled>OpsFlow — unavailable</button>
-          </div>
+          <p>Open applications from the <a href="/">MYOPS homepage</a>; access is checked by the server on every launch.</p>
           {account.profile?.account_type === 'business' && <p>Business workspace setup, seats and invitations are not enabled yet.</p>}
-          <p>Subscriptions and cross-app SSO are not enabled.</p>
-          <p>Sessions expire; sign in again when prompted. Cross-app inactivity logout is not implemented.</p>
+          <section id="subscription" aria-labelledby="subscription-title">
+            <h2 id="subscription-title">Billing and subscriptions</h2>
+            {account.products ? (
+              <ul>
+                {Object.entries(productLabels).map(([slug, label]) => (
+                  <li id={`subscription-${slug}`} key={slug}>
+                    {label}: {({ active: 'Active subscription', none: 'No subscription', coming_soon: 'Coming soon' })[account.products[slug]]}
+                    {account.products[slug] === 'none' && <> — <button type="button" className="btn btn-secondary" disabled>Checkout not enabled in Preview</button></>}
+                  </li>
+                ))}
+              </ul>
+            ) : <p>Subscription status is currently unavailable.</p>}
+            <p>Payments are not active. Application access is granted only after the server confirms an active subscription.</p>
+          </section>
+          <p>Cross-app SSO is not enabled. This site signs you out after 15 minutes of inactivity.</p>
           <button type="button" className="btn btn-primary" disabled={busy} onClick={logout}>Sign out</button>
           <p><a href="/forgot-password">Change password</a></p>
         </>}

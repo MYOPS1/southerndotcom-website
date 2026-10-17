@@ -34,14 +34,15 @@ This is NOT a production launch or a declaration that live auth tests passed.
 - This is server-validated, cookie-backed Supabase authentication, NOT a new central
   opaque-session database. Logout clears cookies and requests global Supabase refresh
   session revocation; already issued JWTs may remain valid until their expiry. It
-  does NOT implement immediate cross-app token revocation or 15-minute inactivity.
+  does NOT implement immediate cross-app token revocation. Phase 2C adds a 15-minute
+  server-enforced inactivity limit for this site only (see phase-2c-homepage-first-auth.md).
 - Signup/recovery use PKCE. A short-lived HttpOnly verifier cookie binds callback
   exchange to the initiating browser; one pending flow per browser (starting another
   overwrites it). Confirmation/recovery must open in that same browser. The SDK stores
   session state only in request-local memory, never in cookies/localStorage except
   the bounded access JWT and PKCE verifier. Parallel email flows need future UX work.
 - Callback is a real `/auth/callback` page. It clears query/fragments immediately,
-  posts code to the BFF, and uses a fixed `/account` or `/account/update-password`
+  posts code to the BFF, and uses a fixed `/` (Phase 2C; formerly `/account`) or `/account/update-password`
   redirect chosen by the SDK's exchanged flow type. No caller `next` URL is accepted.
   No implicit-flow token fragments are accepted. Referrer-Policy is no-referrer.
 - All API operations require POST, exact trusted Host and Origin, and JSON content

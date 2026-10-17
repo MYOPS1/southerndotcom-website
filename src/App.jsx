@@ -1,6 +1,7 @@
 import PropTypes from 'prop-types';
 import { AccountPreview } from './AccountPreview';
 import { AuthPortal } from './AuthPortal';
+import { AuthNav, ProductAction, SessionProvider } from './session';
 import { useEffect, useState } from 'react';
 import {
   AcceptableUsePage,
@@ -351,6 +352,7 @@ function SiteHeader() {
             </a>
           ))}
         </nav>
+        <AuthNav />
       </div>
     </header>
   );
@@ -530,9 +532,12 @@ function LandingPage() {
                 {product.comingSoon ? (
                   <span className="coming-soon-label">Coming Soon</span>
                 ) : (
-                  <a href={product.href} className="card-link" aria-label={product.name}>
-                    <span aria-hidden="true">→</span>
-                  </a>
+                  <>
+                    <a href={product.href} className="card-link" aria-label={product.name}>
+                      <span aria-hidden="true">→</span>
+                    </a>
+                    <ProductAction product={product} />
+                  </>
                 )}
               </article>
             ))}
@@ -1037,6 +1042,7 @@ export default function App() {
 
   const PageComponent = routes[pathname] || LandingPage;
 
+  let page = <PageComponent />;
   if (
     pathname === '/solutions/opsp' ||
     pathname === '/solutions/opsfinance' ||
@@ -1044,8 +1050,8 @@ export default function App() {
     pathname === '/solutions/business-website-application-development' ||
     pathname === '/services/web-and-business-applications'
   ) {
-    return routePageMap[pathname] ? routePageMap[pathname]() : <PageComponent />;
+    page = routePageMap[pathname] ? routePageMap[pathname]() : <PageComponent />;
   }
 
-  return <PageComponent />;
+  return <SessionProvider enabled={import.meta.env.MODE === 'preview-auth'}>{page}</SessionProvider>;
 }

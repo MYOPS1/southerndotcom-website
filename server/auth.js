@@ -1,7 +1,10 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const SESSION = '__Host-myops-access';
 const VERIFIER = '__Host-myops-pkce';
+const ACTIVITY = '__Host-myops-activity';
+export const INACTIVITY_MS = 15 * 60 * 1000;
 const PROJECT = 'https://uhuukcztdifvpjuopdea.supabase.co';
 
 function cookies(req) {
@@ -11,6 +14,59 @@ function cookies(req) {
     try { return [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1))]; }
     catch { return ['', '']; }
   }));
+}
+
+export function signActivity(secret, timestamp) {
+  const value = String(timestamp);
+  return `${value}.${createHmac('sha256', secret).update(value).digest('base64url')}`;
+}
+
+// The activity cookie is HMAC-signed so the browser cannot extend its own session.
+function activityValid(secret, cookie, now) {
+  if (typeof cookie !== 'string') return false;
+  const [value, mac, extra] = cookie.split('.');
+  if (extra !== undefined || !/^\d{1,15}$/.test(value || '') || !mac) return false;
+  const expected = Buffer.from(signActivity(secret, value));
+  const actual = Buffer.from(cookie);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return false;
+  const age = now - Number(value);
+  return age >= 0 && age <= INACTIVITY_MS;
+}
+
+export const PRODUCT_SLUGS = ['opsp', 'opsfinance', 'opsflow', 'opswms', 'opshr'];
+
+// Pure entitlement rules. Row visibility is enforced by Supabase RLS for the caller's JWT;
+// these rules additionally fail closed on status, expiry, catalog state and grants.
+export function resolveProductStates({ userId, catalog, subscriptions, grants, now }) {
+  const entitled = new Set();
+  const live = new Set(catalog.filter((item) => item.launch_status === 'live').map((item) => item.slug));
+  for (const sub of subscriptions) {
+    if (sub.status !== 'active') continue;
+    if (sub.current_period_end && !(Date.parse(sub.current_period_end) > now)) continue;
+    if (sub.personal_user_id) {
+      if (sub.personal_user_id !== userId) continue;
+      if (sub.is_complete_bundle) live.forEach((slug) => entitled.add(slug));
+      else if (sub.product_slug) entitled.add(sub.product_slug);
+    } else if (sub.organization_id) {
+      for (const grant of grants) {
+        if (grant.organization_id === sub.organization_id && (sub.is_complete_bundle || grant.product_slug === sub.product_slug)) {
+          entitled.add(grant.product_slug);
+        }
+      }
+    }
+  }
+  return Object.fromEntries(PRODUCT_SLUGS.map((slug) => [slug,
+    !live.has(slug) ? 'coming_soon' : entitled.has(slug) ? 'active' : 'none']));
+}
+
+async function loadProductStates(client, userId, now) {
+  const [catalog, subscriptions, grants] = await Promise.all([
+    client.from('myops_products').select('slug,launch_status'),
+    client.from('myops_subscriptions').select('personal_user_id,organization_id,product_slug,is_complete_bundle,status,current_period_end'),
+    client.from('myops_app_grants').select('organization_id,product_slug').eq('user_id', userId),
+  ]);
+  if (catalog.error || subscriptions.error || grants.error) return null;
+  return resolveProductStates({ userId, catalog: catalog.data || [], subscriptions: subscriptions.data || [], grants: grants.data || [], now });
 }
 
 function profileFrom(user) {
@@ -33,7 +89,7 @@ const SIGNUP_ERROR_CODES = new Set([
   'hook_payload_invalid_content_type', 'request_timeout',
 ]);
 
-export function createAuthHandler({ env = process.env, clientFactory = createClient, transport = fetch,
+export function createAuthHandler({ env = process.env, clientFactory = createClient, transport = fetch, now = Date.now,
   diagnostic = (entry) => console.warn(JSON.stringify(entry)) } = {}) {
   return async function handler(req, res) {
     res.setHeader('Cache-Control', 'private, no-store');
@@ -51,8 +107,10 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
     if (req.headers.origin !== origin || !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
       return reply(403, { error: 'Request rejected.' });
     }
-    if (env.VITE_SUPABASE_URL !== PROJECT || !env.VITE_SUPABASE_PUBLISHABLE_KEY?.startsWith('sb_publishable_')) {
-      return reply(503, { error: 'Preview authentication is not configured. Ask the owner to set both Supabase variables for this Preview branch and redeploy.' });
+    const secret = env.MYOPS_SESSION_SECRET;
+    if (env.VITE_SUPABASE_URL !== PROJECT || !env.VITE_SUPABASE_PUBLISHABLE_KEY?.startsWith('sb_publishable_')
+        || typeof secret !== 'string' || secret.length < 32) {
+      return reply(503, { error: 'Preview authentication is not configured. Ask the owner to set both Supabase variables and MYOPS_SESSION_SECRET for this Preview branch and redeploy.' });
     }
     const saved = cookies(req);
     const writes = new Map();
@@ -78,6 +136,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       auth: { flowType: 'pkce', persistSession: true, autoRefreshToken: false, detectSessionInUrl: false, storage },
       ...(saved[SESSION] ? { global: { headers: { Authorization: `Bearer ${saved[SESSION]}` } } } : {}),
     });
+    const touch = () => setCookie(ACTIVITY, signActivity(secret, now()), INACTIVITY_MS / 1000);
+    const clearAll = () => [SESSION, ACTIVITY, VERIFIER].forEach((name) => setCookie(name, '', 0));
     const saveSession = async (session) => {
       if (!session?.access_token) return false;
       const { data, error } = await client.auth.getUser(session.access_token);
@@ -85,6 +145,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const ttl = Math.min(3600, Math.floor(session.expires_at - Date.now() / 1000));
       if (!(ttl > 0) || session.access_token.length > 3500) return false;
       setCookie(SESSION, session.access_token, ttl);
+      touch();
       return true;
     };
     try {
@@ -137,7 +198,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         if (!validEmail || typeof body.password !== 'string' || body.password.length > 128) return reply(400, { error: 'Invalid email or password.' });
         const { data, error } = await client.auth.signInWithPassword({ email: body.email, password: body.password });
         if (error || !await saveSession(data?.session)) return reply(401, { error: 'Invalid credentials or email not confirmed.' });
-        return reply(200, { next: '/account' });
+        return reply(200, { next: '/' });
       }
       if (action === 'forgot') {
         if (!validEmail) return reply(400, { error: 'Enter a valid email address.' });
@@ -150,20 +211,39 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         const { data, error } = await client.auth.exchangeCodeForSession(body.code);
         setCookie(VERIFIER, '', 0);
         if (error || !await saveSession(data?.session)) return reply(400, { error: 'Invalid or expired link. Start again.' });
-        return reply(200, { next: data.redirectType === 'recovery' ? '/account/update-password' : '/account' });
+        return reply(200, { next: data.redirectType === 'recovery' ? '/account/update-password' : '/' });
       }
       if (action === 'logout') {
         if (saved[SESSION]) await client.auth.admin.signOut(saved[SESSION], 'global');
-        setCookie(SESSION, '', 0);
-        setCookie(VERIFIER, '', 0);
-        return reply(200, { next: '/login' });
+        clearAll();
+        return reply(200, { next: '/' });
       }
-      if (!['account', 'reset', 'profile'].includes(action)) return reply(400, { error: 'Unknown operation.' });
-      const { data: identity, error: identityError } = saved[SESSION]
+      if (!['account', 'reset', 'profile', 'session', 'launch'].includes(action)) return reply(400, { error: 'Unknown operation.' });
+      const active = saved[SESSION] && activityValid(secret, saved[ACTIVITY], now());
+      const { data: identity, error: identityError } = active
         ? await client.auth.getUser(saved[SESSION]) : { data: {}, error: true };
       if (identityError || !identity.user?.email_confirmed_at) {
-        setCookie(SESSION, '', 0);
-        return reply(401, { error: 'Sign in to continue.' });
+        const expired = Boolean(saved[SESSION]);
+        clearAll();
+        if (action === 'session') return reply(200, { signedIn: false });
+        return reply(401, expired ? { error: 'Your session ended. Sign in again.', reason: 'inactive' } : { error: 'Sign in to continue.' });
+      }
+      // Passive probes must not extend the inactivity window.
+      if (!(action === 'session' && body.activity === false)) touch();
+      if (action === 'session') {
+        const products = await loadProductStates(client, identity.user.id, now());
+        return reply(200, { signedIn: true, email: identity.user.email, products });
+      }
+      if (action === 'launch') {
+        if (!PRODUCT_SLUGS.includes(body.product)) return reply(400, { error: 'Unknown product.' });
+        const products = await loadProductStates(client, identity.user.id, now());
+        if (!products) return reply(503, { error: 'Subscription status is unavailable. Try again later.' });
+        if (products[body.product] !== 'active') return reply(403, { error: 'An active subscription is required for this application.' });
+        const target = env[`MYOPS_APP_URL_${body.product.toUpperCase()}`];
+        if (typeof target !== 'string' || !/^https:\/\/[^\s]+$/.test(target)) {
+          return reply(503, { error: 'Application launch is not configured for this Preview.' });
+        }
+        return reply(200, { next: target });
       }
       if (action === 'reset') {
         if (!validPassword) return reply(400, { error: 'Use a 12–128 character password.' });
@@ -175,7 +255,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         });
         if (!updated.ok) return reply(400, { error: 'Password update failed. Request a new recovery link.' });
         await client.auth.admin.signOut(saved[SESSION], 'global');
-        setCookie(SESSION, '', 0);
+        clearAll();
         return reply(200, { next: '/login' });
       }
       if (action === 'profile') {
@@ -193,7 +273,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         return reply(200, { next: '/account' });
       }
       // Auth metadata is user-editable and descriptive only; it never grants access.
-      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user) });
+      const products = await loadProductStates(client, identity.user.id, now());
+      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user), products });
     } catch {
       // Never log SDK errors, credentials, request bodies, cookies or callback codes.
       return reply(500, { error: 'Authentication request failed. Please try again.' });
