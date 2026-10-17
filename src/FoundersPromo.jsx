@@ -85,31 +85,45 @@ export function FoundersPromo() {
     action = <p className="founders-note">Checkout is not available right now.</p>;
   }
 
+  const inSingle = soldOut && !(session.signedIn && session.lifetime);
   return (
     <section className="content-section founders-promo" id="founders" aria-labelledby="founders-title">
-      <div className="container founders-card">
-        <p className="section-label">Founders 100</p>
+      <div className="container">
+        <p className="section-label">Subscription &amp; Pricing</p>
         <h2 id="founders-title">RM29 once for lifetime access to every MYOPS app</h2>
-        <p>The first 100 paying Individual customers get all current and future MYOPS applications for a single RM29 payment. After the 100 Founder places are taken, RM29/month covers one selected app.</p>
-        {soldOut && <p>All Founders 100 places are taken. Subscribe to one app for RM29/month.</p>}
-        {founders?.available !== undefined && founders.remaining !== undefined && (
-          <p className="founders-count" aria-live="polite">
-            <strong>{founders.remaining}</strong> of {founders.capacity} Founder places remaining
-          </p>
-        )}
-        {action}
+        <div className="pricing-cards">
+          <article className="price-card price-card-featured">
+            <h3>Founders 100</h3>
+            <p className="price-amount">RM29 <span>one-time</span></p>
+            <p>Lifetime access to all current and future MYOPS apps. Limited to the first 100 successfully paying Individual customers.</p>
+            {founders?.available !== undefined && founders.remaining !== undefined && (
+              <p className="founders-count" aria-live="polite">
+                <strong>{founders.remaining}</strong> of {founders.capacity} Founder places remaining
+              </p>
+            )}
+            {inSingle ? <p className="founders-note">All Founders 100 places are taken.</p> : action}
+          </article>
+          <article className="price-card">
+            <h3>Single App</h3>
+            <p className="price-amount">RM29 <span>/ month</span></p>
+            <p>One selected app, renewed monthly. Available after all 100 Founder places are allocated; Individual accounts only.</p>
+            {inSingle ? action : <p className="founders-note">Not yet available.</p>}
+          </article>
+        </div>
         {waiting && <p role="status">Confirming your payment…</p>}
         <p role="status" className="founders-error">{message}</p>
         <ul className="founders-proposed" aria-label="Proposed plans, not yet available">
           {PROPOSED.map((plan) => (
-            <li key={plan.name}>
-              <strong>{plan.name}</strong> — {plan.price} · {plan.note}
-              <button type="button" className="btn btn-secondary" disabled>Not yet available</button>
+            <li key={plan.name} className="price-card price-card-muted">
+              <h3>{plan.name}</h3>
+              <p className="price-amount">{plan.price}</p>
+              <p>{plan.note}</p>
+              <button type="button" className="btn btn-secondary" disabled>Coming Soon</button>
             </li>
           ))}
         </ul>
-        <p className="founders-note">Proposed plans are pending owner approval and cannot be purchased.</p>
-        <p className="founders-note">Sandbox payments only: no real money is charged in Preview.</p>
+        <p className="founders-note">Two-app, All-app and Business plans are pending owner approval and cannot be purchased. Business billing is disabled.</p>
+        <p className="founders-note">Sandbox payments only: no real money is charged in Preview. Payments are verified server-side before access is granted.</p>
       </div>
     </section>
   );
