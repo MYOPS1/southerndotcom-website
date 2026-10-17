@@ -7,6 +7,8 @@ import { PRODUCT_SLUGS, hasLifetime, resolveProductStates } from './entitlements
 const SESSION = '__Host-myops-access';
 const VERIFIER = '__Host-myops-pkce';
 const ACTIVITY = '__Host-myops-activity';
+const IDENTITY = '__Host-myops-identity';
+const IDENTITY_MAX_MS = 12 * 60 * 60 * 1000;
 export const INACTIVITY_MS = 15 * 60 * 1000;
 const PROJECT = 'https://uhuukcztdifvpjuopdea.supabase.co';
 
@@ -34,6 +36,24 @@ function activityValid(secret, cookie, now) {
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return false;
   const age = now - Number(value);
   return age >= 0 && age <= INACTIVITY_MS;
+}
+
+// Server-signed identity bound to the verified login. It lets logout/expiry revoke app access
+// even after the Supabase access token has expired; the browser cannot forge or retarget it.
+export function signIdentity(secret, userId, issuedAt) {
+  const value = `${userId}.${issuedAt}`;
+  return `${value}.${createHmac('sha256', secret).update(`identity:${value}`).digest('base64url')}`;
+}
+
+export function verifiedIdentity(secret, cookie, now) {
+  if (typeof cookie !== 'string' || cookie.length > 200) return null;
+  const [userId, issuedAt, mac, extra] = cookie.split('.');
+  if (extra !== undefined || !/^[A-Za-z0-9-]{1,64}$/.test(userId || '') || !/^\d{1,15}$/.test(issuedAt || '') || !mac) return null;
+  const expected = Buffer.from(signIdentity(secret, userId, issuedAt));
+  const actual = Buffer.from(cookie);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  const age = now - Number(issuedAt);
+  return age >= 0 && age <= IDENTITY_MAX_MS ? userId : null;
 }
 
 export { PRODUCT_SLUGS, hasLifetime, resolveProductStates };
@@ -127,7 +147,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       ...(saved[SESSION] ? { global: { headers: { Authorization: `Bearer ${saved[SESSION]}` } } } : {}),
     });
     const touch = () => setCookie(ACTIVITY, signActivity(secret, now()), INACTIVITY_MS / 1000);
-    const clearAll = () => [SESSION, ACTIVITY, VERIFIER].forEach((name) => setCookie(name, '', 0));
+    const cookieIdentity = () => verifiedIdentity(secret, saved[IDENTITY], now());
+    const clearAll = () => [SESSION, ACTIVITY, IDENTITY, VERIFIER].forEach((name) => setCookie(name, '', 0));
     const saveSession = async (session) => {
       if (!session?.access_token) return false;
       const { data, error } = await client.auth.getUser(session.access_token);
@@ -135,6 +156,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const ttl = Math.min(3600, Math.floor(session.expires_at - Date.now() / 1000));
       if (!(ttl > 0) || session.access_token.length > 3500) return false;
       setCookie(SESSION, session.access_token, ttl);
+      setCookie(IDENTITY, signIdentity(secret, data.user.id, now()), IDENTITY_MAX_MS / 1000);
       touch();
       return true;
     };
@@ -147,6 +169,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const callback = `${origin}/auth/callback`;
       const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
       const appAccess = appAccessFactory({ env, adminFactory: clientFactory, now, project: PROJECT });
+      // Revocation targets only identities proven by the server (signed cookie or verified token).
+      const revokeApps = (...ids) => [...new Set(ids.filter(Boolean))].map((id) => appAccess.revokeUserSessions(id));
       if (action === 'register') {
         if (!validEmail || !validPassword || !['personal', 'business'].includes(body.accountType)
             || typeof body.displayName !== 'string' || body.displayName.trim().length < 1 || body.displayName.length > 120) {
@@ -210,14 +234,18 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       }
       if (action === 'logout') {
         clearAll();
+        let current = null;
         if (saved[SESSION]) {
-          const { data: current } = await client.auth.getUser(saved[SESSION]);
-          const operations = [client.auth.admin.signOut(saved[SESSION], 'global')];
-          if (current?.user?.id) operations.push(appAccess.revokeUserSessions(current.user.id));
-          const results = await Promise.allSettled(operations);
-          if (results.some((result) => result.status === 'rejected')
-              || results[0].value?.error) throw new Error('logout_failed');
+          try { current = (await client.auth.getUser(saved[SESSION])).data?.user ?? null; } catch { current = null; }
         }
+        const operations = revokeApps(current?.id, cookieIdentity());
+        if (saved[SESSION]) operations.unshift(client.auth.admin.signOut(saved[SESSION], 'global'));
+        const results = await Promise.allSettled(operations);
+        // A sign-out error for a token that is already invalid is harmless; app revocation must succeed.
+        const signOutFailed = saved[SESSION] && current
+          && (results[0].status === 'rejected' || results[0].value?.error);
+        const revokeResults = saved[SESSION] ? results.slice(1) : results;
+        if (signOutFailed || revokeResults.some((result) => result.status === 'rejected')) throw new Error('logout_failed');
         return reply(200, { next: '/' });
       }
       if (action === 'founders') return reply(200, await payments.founders());
@@ -226,9 +254,11 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const { data: identity, error: identityError } = saved[SESSION]
         ? await client.auth.getUser(saved[SESSION]) : { data: {}, error: true };
       if (!active || identityError || !identity.user?.email_confirmed_at) {
-        const expired = Boolean(saved[SESSION]);
+        const expired = Boolean(saved[SESSION] || saved[IDENTITY]);
+        const knownUser = identity.user?.id;
         clearAll();
-        if (!active && identity.user?.id) await appAccess.revokeUserSessions(identity.user.id);
+        // MYOPS session ended (inactivity or expired/invalid token): app access ends with it.
+        await Promise.all(revokeApps(knownUser, cookieIdentity()));
         if (action === 'session') return reply(200, { signedIn: false });
         return reply(401, expired ? { error: 'Your session ended. Sign in again.', reason: 'inactive' } : { error: 'Sign in to continue.' });
       }

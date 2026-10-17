@@ -11,19 +11,32 @@ const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{86}$/;
 const REQUEST_SKEW_MS = 5 * 60 * 1000;
 const APP_IDLE_MS = 15 * 60 * 1000;
+const APP_MAX_SESSION_MS = 12 * 60 * 60 * 1000;
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const hashTicket = (ticket) => createHash('sha256').update(ticket).digest('hex');
 
-export function canonicalRequest(method, path, timestamp, nonce, body) {
-  const canonicalBody = JSON.stringify(body, Object.keys(body).sort());
-  const bodyHash = createHash('sha256').update(canonicalBody).digest('hex');
-  return `${method.toUpperCase()}\n${path}\n${timestamp}\n${nonce}\n${bodyHash}`;
+// Deterministic JSON: sorted keys at every depth, so no nested field can change unsigned.
+export function canonicalJson(value) {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol'
+      || (typeof value === 'number' && !Number.isFinite(value))) throw new Error('not_canonical');
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+}
+
+// The signature binds method, path, app, key version, time, nonce and the full body.
+export function canonicalRequest(method, path, appId, keyVersion, timestamp, nonce, body) {
+  const bodyHash = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  return `${method.toUpperCase()}\n${path}\n${appId}\n${keyVersion}\n${timestamp}\n${nonce}\n${bodyHash}`;
 }
 
 export function verifyAppSignature(publicKey, signature, message) {
   if (typeof publicKey !== 'string' || typeof signature !== 'string' || !SIGNATURE.test(signature)) return false;
   try {
-    return verify(null, Buffer.from(message), createPublicKey(publicKey), Buffer.from(signature, 'base64url'));
+    const key = createPublicKey(publicKey);
+    if (key.asymmetricKeyType !== 'ed25519') return false;
+    return verify(null, Buffer.from(message), key, Buffer.from(signature, 'base64url'));
   } catch {
     return false;
   }
@@ -43,13 +56,15 @@ async function rpc(client, name, args) {
 
 function configured(env) {
   return env.VERCEL_ENV === 'preview'
+    && env.MYOPS_ENVIRONMENT === 'staging'
     && env.VITE_SUPABASE_URL === PROJECT
     && typeof env.MYOPS_APP_USER_REF_SECRET === 'string'
     && env.MYOPS_APP_USER_REF_SECRET.length >= 32;
 }
 
 function ipHash(req) {
-  const forwarded = req.headers['x-forwarded-for'];
+  // Vercel sets x-vercel-forwarded-for itself; client-supplied forwarding headers are not trusted first.
+  const forwarded = req.headers['x-vercel-forwarded-for'] || req.headers['x-real-ip'];
   const ip = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : 'unknown';
   return createHash('sha256').update(ip || 'unknown').digest('hex');
 }
@@ -160,13 +175,19 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     });
     if (!inserted || inserted.status !== 'issued') return null;
     destination.pathname = `${destination.pathname.replace(/\/+$/, '')}/launch`;
-    destination.searchParams.set('t', ticket);
+    // Fragment: never sent to servers, access logs or in Referer headers. The app's /launch page
+    // must POST it to its own server and immediately remove it with history.replaceState.
+    destination.hash = `t=${ticket}`;
     return { status: 200, next: destination.toString() };
   }
 
   async function revokeUserSessions(userId) {
+    // Endpoints are disabled when unconfigured, so no app session can be granted. When configured,
+    // a failure to revoke must surface to the caller (fail closed).
+    if (!configured(env)) return false;
+    if (!USER_ID.test(String(userId))) throw new Error('app_access_invalid_user');
     const admin = client();
-    if (!admin) return false;
+    if (!admin) throw new Error('app_access_unavailable');
     await rpc(admin, 'myops_revoke_user_app_access', { p_user_id: userId, p_reason: 'myops_logout' });
     return true;
   }
@@ -190,7 +211,7 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     const keyVersion = req.headers['x-myops-key-version'];
     const publicKey = keyVersion === 'next' ? clientData.public_key_next : keyVersion === 'current' ? clientData.public_key_current : null;
     const path = `/api/app/${endpoint}`;
-    const message = canonicalRequest('POST', path, timestamp, nonce, body);
+    const message = canonicalRequest('POST', path, appId, String(keyVersion), timestamp, nonce, body);
     if (!verifyAppSignature(publicKey, signature, message)) {
       return reply(401, { error: 'Application request is not authorized.' });
     }
@@ -226,13 +247,16 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
         await rpc(admin, 'myops_revoke_app_session', {
           p_session_id: redeemed.session_id, p_reason: 'entitlement_denied',
         });
-        return reply(403, { error: 'Application access is not authorized.' });
+        // Lookup failure is not a denial: tell the app to retry with a new launch.
+        return products ? reply(403, { error: 'Application access is not authorized.' })
+          : reply(503, { error: 'Application access could not be verified.' });
       }
       return reply(200, {
         session_id: redeemed.session_id,
         user_ref: userRef(env.MYOPS_APP_USER_REF_SECRET, appId, redeemed.user_id),
         product: clientData.product_slug,
         idle_seconds: APP_IDLE_MS / 1000,
+        max_session_seconds: APP_MAX_SESSION_MS / 1000,
       });
     } catch {
       return res.status(503).json({ error: 'Application access could not be verified.' });
@@ -245,19 +269,24 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
       auth = await authenticate(req, res, 'entitlement');
       if (!auth || typeof auth.statusCode === 'number') return auth;
       const { admin, appId, clientData, body, reply } = auth;
-      if (Object.keys(body).some((key) => !['session_id', 'product', 'sensitive'].includes(key))
+      if (Object.keys(body).some((key) => !['session_id', 'product', 'sensitive', 'activity'].includes(key))
           || !SESSION_ID.test(body.session_id || '') || body.product !== clientData.product_slug
-          || (body.sensitive !== undefined && typeof body.sensitive !== 'boolean')) {
+          || (body.sensitive !== undefined && typeof body.sensitive !== 'boolean')
+          || (body.activity !== undefined && typeof body.activity !== 'boolean')
+          || (body.sensitive === true && body.activity !== true)) {
         return reply(400, { error: 'Invalid request.' });
       }
       const appSession = await rpc(admin, 'myops_validate_app_session', {
         p_session_id: body.session_id, p_app_id: appId, p_product_slug: body.product,
+        p_touch: body.activity === true,
       });
       if (!appSession?.active || typeof appSession.user_id !== 'string') {
         return reply(403, { entitled: false, session_active: false });
       }
       const products = await entitlementResolver(admin, appSession.user_id, now());
-      const entitled = products?.[body.product] === 'active';
+      // Unknown state (lookup failed): deny this request but keep the session for a later retry.
+      if (!products) return reply(503, { entitled: false, error: 'Application access could not be verified.' });
+      const entitled = products[body.product] === 'active';
       if (!entitled) {
         await rpc(admin, 'myops_revoke_app_session', {
           p_session_id: body.session_id, p_reason: 'entitlement_revoked',

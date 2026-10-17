@@ -9,8 +9,9 @@ begin;
 create table if not exists public.myops_app_clients (
   app_id text primary key check (app_id in ('opsfinance','opsflow','opsp')),
   product_slug text not null unique references public.myops_products(slug),
-  public_key_current text not null check (length(public_key_current) between 100 and 1200),
-  public_key_next text check (public_key_next is null or length(public_key_next) between 100 and 1200),
+  -- Only Ed25519 SPKI public keys (fixed DER prefix + 32-byte key) can be enrolled.
+  public_key_current text not null check (public_key_current ~ '^-----BEGIN PUBLIC KEY-----\s*MCowBQYDK2VwAyEA[A-Za-z0-9+/]{43}=\s*-----END PUBLIC KEY-----\s*$'),
+  public_key_next text check (public_key_next is null or public_key_next ~ '^-----BEGIN PUBLIC KEY-----\s*MCowBQYDK2VwAyEA[A-Za-z0-9+/]{43}=\s*-----END PUBLIC KEY-----\s*$'),
   enabled boolean not null default false,
   rotated_at timestamptz,
   created_at timestamptz not null default now()
@@ -48,7 +49,7 @@ create table if not exists public.myops_app_audit (
   id bigint generated always as identity primary key,
   app_id text references public.myops_app_clients(app_id) on delete set null,
   event text not null check (event in ('ticket_issued','ticket_redeemed','session_revoked','rate_limited')),
-  reason_code text not null check (reason_code in ('issued','redeemed','logout','entitlement_revoked','entitlement_denied','idle_expired','rate_limit')),
+  reason_code text not null check (reason_code in ('issued','redeemed','logout','entitlement_revoked','entitlement_denied','idle_expired','absolute_expired','rate_limit')),
   created_at timestamptz not null default now()
 );
 create index if not exists myops_app_audit_created_idx on public.myops_app_audit(created_at desc);
@@ -57,7 +58,7 @@ alter table public.myops_app_sessions
   add column if not exists app_id text references public.myops_app_clients(app_id),
   add column if not exists product_slug text references public.myops_products(slug),
   add column if not exists ended_reason text check (ended_reason is null or ended_reason in (
-    'myops_logout','entitlement_denied','entitlement_revoked','idle_expired','admin_revoked'
+    'myops_logout','entitlement_denied','entitlement_revoked','idle_expired','absolute_expired','admin_revoked'
   ));
 create index if not exists myops_app_sessions_active_user_idx
   on public.myops_app_sessions(user_id, app_id) where revoked_at is null;
@@ -108,7 +109,7 @@ begin
   if p_nonce_hash !~ '^[a-f0-9]{64}$' then return false; end if;
   delete from public.myops_app_nonces where expires_at <= now();
   insert into public.myops_app_nonces (nonce_hash, app_id, expires_at)
-  select p_nonce_hash, c.app_id, now() + interval '10 minutes'
+  select p_nonce_hash, c.app_id, now() + interval '15 minutes'
   from public.myops_app_clients c where c.app_id = p_app_id and c.enabled
   on conflict (nonce_hash) do nothing;
   get diagnostics v_inserted = row_count;
@@ -136,27 +137,30 @@ begin
     'session_id', v_session, 'product_slug', v_ticket.product_slug);
 end $$;
 
-create or replace function public.myops_validate_app_session(p_session_id uuid, p_app_id text, p_product_slug text)
+-- Validation never extends the session unless the app asserts genuine user activity (p_touch).
+-- Idle limit: 15 minutes since last user activity. Absolute limit: 12 hours since creation.
+create or replace function public.myops_validate_app_session(p_session_id uuid, p_app_id text, p_product_slug text, p_touch boolean default false)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare v_session public.myops_app_sessions;
+declare v_session public.myops_app_sessions; v_reason text;
 begin
-  update public.myops_app_sessions
-    set last_activity_at = now()
-    where id = p_session_id and app_id = p_app_id and product_slug = p_product_slug
-      and revoked_at is null and last_activity_at > now() - interval '15 minutes'
-    returning * into v_session;
-  if found then
-    return jsonb_build_object('active', true, 'user_id', v_session.user_id);
+  select * into v_session from public.myops_app_sessions
+    where id = p_session_id and app_id = p_app_id and product_slug = p_product_slug for update;
+  if not found or v_session.revoked_at is not null then
+    return jsonb_build_object('active', false);
   end if;
-  update public.myops_app_sessions
-    set revoked_at = now(), ended_reason = 'idle_expired'
-    where id = p_session_id and app_id = p_app_id and revoked_at is null
-      and last_activity_at <= now() - interval '15 minutes';
-  if found then
+  if v_session.created_at <= now() - interval '12 hours' then v_reason := 'absolute_expired';
+  elsif v_session.last_activity_at <= now() - interval '15 minutes' then v_reason := 'idle_expired';
+  end if;
+  if v_reason is not null then
+    update public.myops_app_sessions set revoked_at = now(), ended_reason = v_reason where id = p_session_id;
     insert into public.myops_app_audit (app_id, event, reason_code)
-      values (p_app_id, 'session_revoked', 'idle_expired');
+      values (p_app_id, 'session_revoked', v_reason);
+    return jsonb_build_object('active', false);
   end if;
-  return jsonb_build_object('active', false);
+  if coalesce(p_touch, false) then
+    update public.myops_app_sessions set last_activity_at = now() where id = p_session_id;
+  end if;
+  return jsonb_build_object('active', true, 'user_id', v_session.user_id);
 end $$;
 
 create or replace function public.myops_revoke_app_session(p_session_id uuid, p_reason text)
@@ -223,15 +227,48 @@ begin
   return true;
 end $$;
 
+-- Retention. Schedule only after owner approval (for example hourly with pg_cron or a trusted job).
+create or replace function public.myops_cleanup_app_access()
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare v_nonces integer; v_rates integer; v_tickets integer; v_audit integer; v_sessions integer;
+begin
+  delete from public.myops_app_nonces where expires_at <= now();
+  get diagnostics v_nonces = row_count;
+  delete from public.myops_app_rate_limits where updated_at < now() - interval '1 day';
+  get diagnostics v_rates = row_count;
+  delete from public.myops_app_tickets where expires_at < now() - interval '1 day';
+  get diagnostics v_tickets = row_count;
+  delete from public.myops_app_audit where created_at < now() - interval '90 days';
+  get diagnostics v_audit = row_count;
+  delete from public.myops_app_sessions
+    where app_id is not null and (revoked_at < now() - interval '30 days'
+      or (revoked_at is null and last_activity_at < now() - interval '30 days'));
+  get diagnostics v_sessions = row_count;
+  return jsonb_build_object('nonces', v_nonces, 'rate_limits', v_rates, 'tickets', v_tickets,
+    'audit', v_audit, 'sessions', v_sessions);
+end $$;
+
+-- Promotes the staged next key after the app has deployed it. Old key stops working immediately.
+create or replace function public.myops_promote_app_key(p_app_id text)
+returns boolean language plpgsql security definer set search_path = '' as $$
+begin
+  update public.myops_app_clients
+    set public_key_current = public_key_next, public_key_next = null, rotated_at = now()
+    where app_id = p_app_id and public_key_next is not null;
+  return found;
+end $$;
+
 revoke all on function public.myops_get_app_client(text),
   public.myops_issue_app_ticket(uuid,text,text), public.myops_record_app_nonce(text,text),
-  public.myops_redeem_app_ticket(text,text), public.myops_validate_app_session(uuid,text,text),
+  public.myops_redeem_app_ticket(text,text), public.myops_validate_app_session(uuid,text,text,boolean),
   public.myops_revoke_app_session(uuid,text), public.myops_revoke_user_app_access(uuid,text),
-  public.myops_check_app_rate_limit(text,integer,integer) from public, anon, authenticated;
+  public.myops_check_app_rate_limit(text,integer,integer),
+  public.myops_cleanup_app_access(), public.myops_promote_app_key(text) from public, anon, authenticated;
 grant execute on function public.myops_get_app_client(text),
   public.myops_issue_app_ticket(uuid,text,text), public.myops_record_app_nonce(text,text),
-  public.myops_redeem_app_ticket(text,text), public.myops_validate_app_session(uuid,text,text),
+  public.myops_redeem_app_ticket(text,text), public.myops_validate_app_session(uuid,text,text,boolean),
   public.myops_revoke_app_session(uuid,text), public.myops_revoke_user_app_access(uuid,text),
-  public.myops_check_app_rate_limit(text,integer,integer) to service_role;
+  public.myops_check_app_rate_limit(text,integer,integer),
+  public.myops_cleanup_app_access(), public.myops_promote_app_key(text) to service_role;
 
 commit;

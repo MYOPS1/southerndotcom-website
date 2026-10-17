@@ -115,3 +115,30 @@ Priority order:
 8. Re-review, then owner approval before migration, app-client enrolment and OpsFinance integration.
 
 Remediation, migrations and staging activation await owner approval.
+
+---
+
+## 8. Remediation status (follow-up commit)
+
+Implemented in code, the unapplied SQL proposal and tests. Evidence: **LOCAL TEST** only (automated tests and a throwaway local PostgreSQL); nothing has been validated on staging or Supabase, and the apps are not integrated.
+
+| Finding | Status | Change |
+|---|---|---|
+| H-1 | FIXED (local) | Server-signed identity cookie (`server/auth.js`); logout, inactivity, invalid/expired token and password reset revoke by verified identity only; revocation failure returns 500 (fail closed); tolerant of an already-invalid token's sign-out error. Tests: forged/tampered/stale cookie, expired token, no token, revocation outage. |
+| H-2 | FIXED (local) | `myops_validate_app_session(…, p_touch)` extends only on asserted activity; 12 h absolute limit (`absolute_expired`); `sensitive` requires `activity`. SQL tests for polling, idle and absolute expiry. |
+| M-1 | MITIGATED | Ticket in URL fragment, not query; app must strip it (app side UNVERIFIED, not yet integrated). Residual: fragment remains in the browser's history entry until the app calls `replaceState`. |
+| M-2 | FIXED (local) | Lookup failure → 503 without revoking an existing session; redeem closes the unverified new session and returns 503. |
+| M-3 | MITIGATED | `MYOPS_ENVIRONMENT=staging` required. Owner must still verify the Supabase project is non-production (UNVERIFIED). |
+| M-4 | FIXED (local) | Nonce retention 15 min (> 2 × 5 min skew). |
+| M-5 | PARTIAL | `myops_cleanup_app_access()` added and tested; no scheduler configured (needs approval). Unauthenticated requests still do one rate-limit write; edge/WAF limiting is still required. IP bucket now prefers `x-vercel-forwarded-for` (platform behaviour UNVERIFIED). |
+| L-1 | FIXED (local) | Ed25519 enforced in code (512-bit RSA 64-byte-signature regression) and by SQL check. |
+| L-2 | FIXED (local) | App id and key version are signed. |
+| L-3 | FIXED (local) | Recursive canonical JSON; nested/extra field tampering tests. |
+| L-4 | OPEN | Audit still has no correlation id. |
+| L-5 | ACCEPTED | Logout revokes all devices. |
+| L-6 | FIXED (local) | `myops_promote_app_key` and rollback proposal (not executed). |
+| L-7, L-8 | OPEN / ACCEPTED | Unchanged; service-role-only RPC; MYOPS account state is covered through cascades. |
+
+Remaining risks: a closed tab leaves the app session until its 15-minute idle expiry; app-side route enforcement is unimplemented; the direct app URLs may still bypass MYOPS until S1-C; no scheduler or WAF; Supabase project isolation unverified; no staging or end-to-end validation.
+
+**Updated recommendation: staging activation is CONDITIONAL GO** — acceptable for an owner-approved, non-production staging trial of the unapplied migration once the owner (1) confirms the Supabase project is non-production, (2) approves the revised SQL after a second review, and (3) accepts the residual risks above. It is **NO-GO** for any Production or live-user exposure. Direct app URL bypass is not closed until the app integrations are done.

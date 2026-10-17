@@ -11,10 +11,10 @@ This implements the server-side ticket issuer, redemption and entitlement-verifi
 The existing auth handler still requires its exact trusted Preview host, same-origin JSON POST, confirmed MYOPS identity and valid signed 15-minute activity cookie. It loads current entitlements and refuses non-live or unentitled products. It now creates a 32-byte cryptographically random ticket and returns a redirect URL of the form:
 
 ```text
-https://<registered-preview-app-host>/<configured-base-path>/launch?t=<opaque-ticket>
+https://<registered-preview-app-host>/<configured-base-path>/launch#t=<opaque-ticket>
 ```
 
-The browser receives the opaque ticket because it must hand it to the app. MYOPS stores only its lowercase SHA-256 hash. The database proposal sets the expiry to 60 seconds. App target URLs are server environment configuration and must be HTTPS with no userinfo, query or fragment. The app ID/product mapping is also checked against the registered database client.
+The ticket is delivered in the URL **fragment**, which browsers never send to servers, access logs or `Referer` headers. The browser receives it because it must hand it to the app. The app's `/launch` page must read it from `location.hash`, immediately remove it with `history.replaceState`, and `POST` it to the app's own server (with `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and no analytics on that page). MYOPS stores only its lowercase SHA-256 hash. The database proposal sets the expiry to 60 seconds. App target URLs are server environment configuration and must be HTTPS with no userinfo, query or fragment. The app ID/product mapping is also checked against the registered database client.
 
 ### Redeem: `POST /api/app/redeem`
 
@@ -35,7 +35,7 @@ It returns no email, Supabase ID, access token, refresh token, ticket hash or MY
 
 ### Verify: `POST /api/app/entitlement`
 
-The app server supplies its app session ID, product and an optional sensitive-action boolean under the same Ed25519 contract. The MYOPS API validates the app ID/product/session, rejects revoked or idle sessions, and does a fresh entitlement lookup for every call (no MYOPS-side entitlement cache). It returns only `{ entitled, session_active, checked_at }` or a generic denial.
+The app server supplies its app session ID, product, `activity` (true only when the request was caused by genuine user activity; default false) and an optional `sensitive` boolean under the same Ed25519 contract. `sensitive: true` requires `activity: true`. Polling or heartbeats (`activity` false/omitted) never extend the 15-minute inactivity window. The MYOPS API validates the app ID/product/session, rejects revoked or idle sessions, and does a fresh entitlement lookup for every call (no MYOPS-side entitlement cache). It returns only `{ entitled, session_active, checked_at }` or a generic denial. If the entitlement lookup itself fails it returns 503 and keeps the session (the app must deny that request); only a successful lookup showing no entitlement revokes the session.
 
 Apps must call this endpoint for every sensitive operation. Normal browsing integrations may use the approved maximum 5-minute cache, but the app must end its own session at its 15-minute idle deadline. An API outage denies sensitive operations immediately and denies normal access after the integration's short fail-closed grace period. That app-side behaviour remains unimplemented.
 
@@ -56,12 +56,14 @@ Canonical signature message (UTF-8):
 ```text
 <uppercase method>
 <fixed path, /api/app/redeem or /api/app/entitlement>
+<app id>
+<key version header: current or next>
 <13-digit Unix-millisecond timestamp>
 <base64url nonce>
 <lowercase hex SHA-256 of canonical JSON body>
 ```
 
-Canonical JSON is the request's top-level keys sorted lexicographically and encoded with compact `JSON.stringify` (request bodies are flat). Signature is base64url Ed25519. The client must sign the same bytes and use HTTPS. Signature/key errors return generic 401; timestamps outside the window, nonce reuse, disabled clients, wrong app and invalid tickets fail closed.
+Canonical JSON sorts object keys at every nesting level and encodes with compact JSON, so no nested or extra field can change without invalidating the signature. The app id and key version are signed. Only Ed25519 public keys are accepted (verified in code via `asymmetricKeyType`, and enforced by a database check on the SPKI prefix). Signature is base64url Ed25519. The client must sign the same bytes and use HTTPS. Signature/key errors return generic 401; timestamps outside the window, nonce reuse, disabled clients, wrong app and invalid tickets fail closed.
 
 Rotation: add the new public key as `public_key_next`; deploy the app with its matching private key and `X-Myops-Key-Version: next`; verify Preview traffic; promote the new key to current and clear next; remove the old private key. Do not put private key material in SQL, Git, browser config or logs.
 
@@ -69,9 +71,10 @@ The independent `MYOPS_APP_USER_REF_SECRET` is a MYOPS server secret used to der
 
 ## Logout, inactivity and expiry
 
-- Explicit MYOPS logout looks up the verified user, signs out the MYOPS Auth token, and calls the service-only `myops_revoke_user_app_access` RPC. It revokes all unused tickets and active app sessions for that user across all registered apps.
-- When MYOPS detects an expired 15-minute activity cookie, it clears the browser cookies and revokes the user's app sessions when Supabase can still verify the access token.
-- App-side app sessions are separately idle-checked at 15 minutes by `myops_validate_app_session`; stale rows are revoked at the next verification. The app itself must enforce its own 15-minute idle limit on every protected route.
+- MYOPS stores a server-HMAC-signed identity cookie (`__Host-myops-identity`, HttpOnly, 12 h) at login. Revocation uses only identities proven by the server: this signed cookie or a verified token. Forged, tampered or stale cookies are ignored, and revocation does not depend on a live Supabase access token.
+- Explicit MYOPS logout signs out the MYOPS Auth token (a sign-out error for an already invalid token is tolerated) and calls the service-only `myops_revoke_user_app_access` RPC. It revokes all unused tickets and active app sessions for that user across all registered apps.
+- When MYOPS detects an expired 15-minute activity cookie or an invalid/expired token, it clears the cookies and revokes the user's app sessions. If revocation fails, the request fails (HTTP 500) rather than reporting success. Closing a tab sends no request, so app sessions in that case end by their own 15-minute inactivity limit.
+- App sessions are idle-checked at 15 minutes since last asserted user activity and have a 12-hour absolute lifetime (`max_session_seconds` in the redeem response) in `myops_validate_app_session`; stale rows are revoked at the next verification. The app itself must enforce its own 15-minute idle limit on every protected route.
 - Subscription/lifetime access is freshly read when a ticket is redeemed and on each entitlement API call. A revoked/expired entitlement cannot get a new ticket and revokes a session on its next check. Sensitive operations require a fresh call, no cache.
 - Target normal-browsing revocation latency remains at most five minutes, dependent on the app integration checking at least every five minutes. Sensitive operations are checked on every action. No push-revocation webhook exists yet.
 - MYOPS logout cannot instantly erase an app's local session without an app request. App integrations must check on every protected route and reject a revoked session. The current app repositories are not changed, so their existing URLs may still bypass MYOPS until S1-C integration.
@@ -102,6 +105,7 @@ The migration has no app-client seed rows. After security review/approval, each 
 
 | Variable | Purpose |
 |---|---|
+| `MYOPS_ENVIRONMENT` | Must be exactly `staging`; otherwise all app-access endpoints and ticket issuance stay disabled (503). Set only on the verified staging Preview scope, never Production. |
 | `MYOPS_SERVICE_ROLE_KEY` | Existing server-only Supabase secret key; never expose to client code. |
 | `MYOPS_APP_USER_REF_SECRET` | At least 32 random bytes, server-only, dedicated to per-app opaque references. |
 | `MYOPS_APP_URL_OPSFINANCE` | HTTPS OpsFinance Preview base URL/path (no query or fragment). |
@@ -159,3 +163,7 @@ These are unit/local database tests, **not** a live Preview/Supabase/app E2E int
 ## Approval gate
 
 No Supabase migration execution and no OpsFinance integration are authorized by this implementation task. Wait for owner approval of the SQL security review, staging config and S1-C app plan.
+
+## S1-B security remediation (post-review)
+
+See [phase3-s1-b-security-review.md](./phase3-s1-b-security-review.md) for the findings and their remediation status. Additional proposal objects: `myops_cleanup_app_access()` (retention; schedule only after approval), `myops_promote_app_key(text)` (key rotation) and `supabase/proposals/202610170001_myops_app_access_rollback.sql` (not executed). Rate-limit client identity prefers `x-vercel-forwarded-for` (set by the platform) over client-controlled headers.

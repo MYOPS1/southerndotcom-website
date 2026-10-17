@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthHandler, signActivity, resolveProductStates } from '../server/auth.js';
+import { createAuthHandler, signActivity, signIdentity, verifiedIdentity, resolveProductStates } from '../server/auth.js';
 import { createClient } from '@supabase/supabase-js';
 
 const origin = 'https://trusted-preview.vercel.app';
@@ -399,4 +399,73 @@ test('resolveProductStates: bundles, organisation grants and catalog state', () 
   assert.equal(states([org], [{ organization_id: 'org-2', product_slug: 'opsfinance' }]).opsfinance, 'none');
   assert.equal(states([org], [{ organization_id: 'org-1', product_slug: 'opsp' }]).opsp, 'none');
   assert.equal(states([org], [{ organization_id: 'org-1', product_slug: 'opsfinance' }]).opsfinance, 'active');
+});
+
+const identityCookie = (id = user.id, ageMs = 0) => `__Host-myops-identity=${signIdentity(env.MYOPS_SESSION_SECRET, id, NOW - ageMs)}`;
+const expiredToken = mock({
+  getUser: async () => ({ data: { user: null }, error: { message: 'jwt expired' } }),
+  admin: { signOut: async () => ({ error: { message: 'jwt expired' } }) },
+});
+
+test('regression H-1: login stores a server-signed identity that the browser cannot forge', async () => {
+  const result = await run(login);
+  const identity = result.headers['Set-Cookie'].find((cookie) => cookie.startsWith('__Host-myops-identity='));
+  assert.match(identity, /HttpOnly; Secure; SameSite=Lax; Max-Age=43200/);
+  const value = decodeURIComponent(identity.split(';')[0].split('=').slice(1).join('='));
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, value, NOW), user.id);
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, value.replace(user.id, 'other-user'), NOW), null);
+  assert.equal(verifiedIdentity('x'.repeat(40), value, NOW), null);
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, value, NOW + 12 * 3600 * 1000 + 1), null);
+});
+
+test('regression H-1: logout with an expired Supabase token still revokes app access', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => { revoked.push(id); return true; } });
+  const result = await run({ action: 'logout' }, {
+    headers: { cookie: `${signedIn()}; ${identityCookie()}` }, client: expiredToken, appAccessFactory,
+  });
+  assert.equal(result.code, 200);
+  assert.deepEqual(revoked, [user.id]);
+  const noToken = await run({ action: 'logout' }, { headers: { cookie: identityCookie() }, appAccessFactory });
+  assert.equal(noToken.code, 200);
+  assert.deepEqual(revoked, [user.id, user.id]);
+});
+
+test('regression H-1: forged, tampered or stale identity cookies never select a user to revoke', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => { revoked.push(id); return true; } });
+  for (const cookie of ['__Host-myops-identity=victim-user.1.AAAA',
+    `__Host-myops-identity=${signIdentity('y'.repeat(40), 'victim-user', NOW)}`,
+    identityCookie('victim-user', 13 * 3600 * 1000)]) {
+    assert.equal((await run({ action: 'logout' }, { headers: { cookie }, appAccessFactory })).code, 200);
+  }
+  assert.deepEqual(revoked, []);
+});
+
+test('regression H-1: inactivity and an expired token revoke app access even without a usable token', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => { revoked.push(id); return true; } });
+  const idle = await run({ action: 'session' }, {
+    headers: { cookie: `__Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - 16 * 60 * 1000)}; ${identityCookie()}` },
+    appAccessFactory,
+  });
+  assert.equal(idle.code, 200);
+  assert.deepEqual(idle.data, { signedIn: false });
+  assert.deepEqual(revoked, [user.id]);
+  const expired = await run({ action: 'account' }, {
+    headers: { cookie: `${signedIn()}; ${identityCookie()}` }, client: expiredToken, appAccessFactory,
+  });
+  assert.equal(expired.code, 401);
+  assert.deepEqual(revoked, [user.id, user.id]);
+  assert.ok(expired.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-identity=;')));
+});
+
+test('regression H-1: a failed app-access revocation fails closed and still clears cookies', async () => {
+  const appAccessFactory = () => ({ revokeUserSessions: async () => { throw new Error('app_access_unavailable'); } });
+  const result = await run({ action: 'logout' }, { headers: { cookie: `${signedIn()}; ${identityCookie()}` }, appAccessFactory });
+  assert.equal(result.code, 500);
+  assert.ok(result.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-access=;')));
+  const idle = await run({ action: 'account' }, {
+    headers: { cookie: `${signedIn(15 * 60 * 1000 + 1)}; ${identityCookie()}` }, appAccessFactory });
+  assert.equal(idle.code, 500);
 });

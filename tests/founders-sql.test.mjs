@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 
 // Runs the PROPOSED Phase 3 SQL against a throwaway local PostgreSQL cluster (never Supabase)
 // with genuinely concurrent sessions. Skipped when PostgreSQL binaries are not installed.
@@ -35,6 +35,7 @@ async function newUser({ confirmed = true, type = 'personal' } = {}) {
   return id;
 }
 const order = () => `MYOPS-test-${String(++counter).padStart(6, '0')}${Math.random().toString(36).slice(2, 8)}`;
+const edPem = () => generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' });
 const ticketHash = () => randomBytes(32).toString('hex');
 const bill = () => `b${Math.random().toString(36).slice(2, 10)}`;
 async function checkout(user, plan = 'founders_lifetime', product = plan === 'single_app_monthly' ? 'opsp' : null) {
@@ -308,7 +309,7 @@ test('S1 app-access proposal has RLS and service_role-only functions', { skip },
 
 test('S1 tickets are app-bound, expire in 60 seconds, and concurrent redemption consumes once', { skip }, async () => {
   const user = await newUser();
-  const key = `'-----BEGIN PUBLIC KEY-----\\n${'A'.repeat(120)}\\n-----END PUBLIC KEY-----'`;
+  const key = q(edPem());
   for (const [id, product] of [['opsp', 'opsp'], ['opsfinance', 'opsfinance']]) {
     await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
       values (${q(id)}, ${q(product)}, ${key}, true)
@@ -331,7 +332,7 @@ test('S1 tickets are app-bound, expire in 60 seconds, and concurrent redemption 
 
 test('S1 expired tickets, replayed nonces, rate limits and logout revocation fail closed', { skip }, async () => {
   const user = await newUser();
-  const key = `'-----BEGIN PUBLIC KEY-----\\n${'B'.repeat(120)}\\n-----END PUBLIC KEY-----'`;
+  const key = q(edPem());
   await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
     values ('opsp', 'opsp', ${key}, true)
     on conflict (app_id) do update set public_key_current = excluded.public_key_current, enabled = true`);
@@ -366,7 +367,7 @@ test('S1 expired tickets, replayed nonces, rate limits and logout revocation fai
 
 test('S1 idle app sessions are revoked after 15 minutes', { skip }, async () => {
   const user = await newUser();
-  const key = `'-----BEGIN PUBLIC KEY-----\\n${'C'.repeat(120)}\\n-----END PUBLIC KEY-----'`;
+  const key = q(edPem());
   await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
     values ('opsp', 'opsp', ${key}, true)
     on conflict (app_id) do update set public_key_current = excluded.public_key_current, enabled = true`);
@@ -378,10 +379,83 @@ test('S1 idle app sessions are revoked after 15 minutes', { skip }, async () => 
   assert.equal(await svc(`select ended_reason from public.myops_app_sessions where id = ${q(redeemed.session_id)}`), 'idle_expired');
 });
 
+async function liveSession(user, app = 'opsp') {
+  await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
+    values (${q(app)}, ${q(app)}, ${q(edPem())}, true)
+    on conflict (app_id) do update set enabled = true`);
+  const hash = ticketHash();
+  await call(`select public.myops_issue_app_ticket(${q(user)}, ${q(app)}, ${q(hash)})`);
+  return (await call(`select public.myops_redeem_app_ticket(${q(app)}, ${q(hash)})`)).session_id;
+}
+const validate = (id, touch = false) => call(`select public.myops_validate_app_session(${q(id)}, 'opsp', 'opsp', ${touch})`);
+
+test('regression H-2: validation polling never extends inactivity; asserted activity does', { skip }, async () => {
+  const id = await liveSession(await newUser());
+  await svc(`update public.myops_app_sessions set last_activity_at = now() - interval '14 minutes' where id = ${q(id)}`);
+  assert.equal((await validate(id, false)).active, true);
+  const before = await svc(`select extract(epoch from now() - last_activity_at)::int >= 14 * 60 from public.myops_app_sessions where id = ${q(id)}`);
+  assert.equal(before, 't', 'polling left last_activity_at unchanged');
+  await svc(`update public.myops_app_sessions set last_activity_at = now() - interval '16 minutes' where id = ${q(id)}`);
+  assert.equal((await validate(id, false)).active, false, 'idle session stays dead despite polling');
+  const second = await liveSession(await newUser());
+  await svc(`update public.myops_app_sessions set last_activity_at = now() - interval '14 minutes' where id = ${q(second)}`);
+  assert.equal((await validate(second, true)).active, true);
+  assert.equal(await svc(`select now() - last_activity_at < interval '1 minute' from public.myops_app_sessions where id = ${q(second)}`), 't');
+});
+
+test('regression H-2: sessions expire at the 12-hour absolute limit even with constant activity', { skip }, async () => {
+  const id = await liveSession(await newUser());
+  await svc(`update public.myops_app_sessions set created_at = now() - interval '11 hours 59 minutes' where id = ${q(id)}`);
+  assert.equal((await validate(id, true)).active, true);
+  await svc(`update public.myops_app_sessions set created_at = now() - interval '12 hours 1 minute' where id = ${q(id)}`);
+  assert.equal((await validate(id, true)).active, false);
+  assert.equal(await svc(`select ended_reason from public.myops_app_sessions where id = ${q(id)}`), 'absolute_expired');
+  assert.equal((await validate(id, true)).active, false, 'revoked sessions stay revoked');
+});
+
+test('regression review: only Ed25519 SPKI keys can be enrolled; keys rotate with promote', { skip }, async () => {
+  const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' });
+  await assert.rejects(sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current)
+    values ('opsflow', 'opsflow', ${q(rsa)})`), /check constraint/);
+  await assert.rejects(sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current)
+    values ('opsflow', 'opsflow', ${q('-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----')})`), /check constraint/);
+  const next = edPem();
+  await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, public_key_next, enabled)
+    values ('opsfinance', 'opsfinance', ${q(edPem())}, ${q(next)}, true)
+    on conflict (app_id) do update set public_key_current = excluded.public_key_current, public_key_next = excluded.public_key_next`);
+  assert.equal(await svc(`select public.myops_promote_app_key('opsfinance')`), 't');
+  assert.equal(await svc(`select public_key_current = ${q(next)} and public_key_next is null from public.myops_app_clients where app_id = 'opsfinance'`), 't');
+  assert.equal(await svc(`select public.myops_promote_app_key('opsfinance')`), 'f');
+});
+
+test('regression review: nonces outlive the full timestamp window and cleanup enforces retention', { skip }, async () => {
+  const id = await liveSession(await newUser());
+  const nonce = ticketHash();
+  assert.equal(await svc(`select public.myops_record_app_nonce('opsp', ${q(nonce)})`), 't');
+  assert.equal(await svc(`select expires_at - now() > interval '14 minutes' from public.myops_app_nonces where nonce_hash = ${q(nonce)}`), 't');
+  const oldKey = ticketHash();
+  await svc(`select public.myops_check_app_rate_limit(${q(oldKey)}, 5, 60)`);
+  await svc(`update public.myops_app_rate_limits set updated_at = now() - interval '2 days' where key_hash = ${q(oldKey)}`);
+  await svc(`update public.myops_app_sessions set revoked_at = now() - interval '31 days' where id = ${q(id)}`);
+  const result = await call('select public.myops_cleanup_app_access()');
+  assert.ok(result.rate_limits >= 1 && result.sessions >= 1);
+  assert.equal(await svc(`select count(*) from public.myops_app_rate_limits where key_hash = ${q(oldKey)}`), '0');
+  assert.equal(await svc(`select count(*) from public.myops_app_sessions where id = ${q(id)}`), '0');
+  assert.equal(await svc(`select count(*) from public.myops_app_nonces where nonce_hash = ${q(nonce)}`), '1');
+  for (const role of ['anon', 'authenticated']) {
+    await assert.rejects(sql('select public.myops_cleanup_app_access()', { role }), /permission denied/);
+    await assert.rejects(sql(`select public.myops_promote_app_key('opsp')`, { role }), /permission denied/);
+  }
+});
+
 test('S1 SQL proposal retains pinned search_path and has no client write policies', () => {
   const text = readFileSync(new URL('../supabase/proposals/202610170001_myops_app_access.sql', import.meta.url), 'utf8');
   assert.equal((text.match(/security definer set search_path = ''/g) || []).length, (text.match(/create or replace function/g) || []).length);
   assert.match(text, /grant execute[^;]*to service_role;/s);
   assert.doesNotMatch(text, /create policy[^;]*for (insert|update|delete|all)/i);
   assert.match(text, /NOT EXECUTED/);
+  const rollback = readFileSync(new URL('../supabase/proposals/202610170001_myops_app_access_rollback.sql', import.meta.url), 'utf8');
+  assert.match(rollback, /NOT EXECUTED/);
+  for (const [, name] of text.matchAll(/create or replace function public\.(\w+)/g)) assert.ok(rollback.includes(name), `rollback drops ${name}`);
+  for (const [, name] of text.matchAll(/create table if not exists public\.(\w+)/g)) assert.ok(rollback.includes(name), `rollback drops ${name}`);
 });
