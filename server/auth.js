@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
+import { createPayments } from './payments.js';
 
 const SESSION = '__Host-myops-access';
 const VERIFIER = '__Host-myops-pkce';
@@ -37,9 +38,16 @@ export const PRODUCT_SLUGS = ['opsp', 'opsfinance', 'opsflow', 'opswms', 'opshr'
 
 // Pure entitlement rules. Row visibility is enforced by Supabase RLS for the caller's JWT;
 // these rules additionally fail closed on status, expiry, catalog state and grants.
-export function resolveProductStates({ userId, catalog, subscriptions, grants, now }) {
+const SLUG = /^[a-z0-9_]{1,32}$/;
+
+export const hasLifetime = (userId, lifetime = []) =>
+  lifetime.some((row) => row.user_id === userId && row.status === 'active' && row.scope === 'all_apps');
+
+export function resolveProductStates({ userId, catalog, subscriptions, grants, lifetime = [], now }) {
   const entitled = new Set();
-  const live = new Set(catalog.filter((item) => item.launch_status === 'live').map((item) => item.slug));
+  const live = new Set(catalog.filter((item) => item.launch_status === 'live' && SLUG.test(item.slug)).map((item) => item.slug));
+  // Lifetime access covers every live catalog app, including apps launched after purchase.
+  if (hasLifetime(userId, lifetime)) live.forEach((slug) => entitled.add(slug));
   for (const sub of subscriptions) {
     if (sub.status !== 'active') continue;
     if (sub.current_period_end && !(Date.parse(sub.current_period_end) > now)) continue;
@@ -55,18 +63,29 @@ export function resolveProductStates({ userId, catalog, subscriptions, grants, n
       }
     }
   }
-  return Object.fromEntries(PRODUCT_SLUGS.map((slug) => [slug,
+  const slugs = [...new Set([...PRODUCT_SLUGS, ...catalog.map((item) => item.slug).filter((slug) => SLUG.test(slug))])];
+  return Object.fromEntries(slugs.map((slug) => [slug,
     !live.has(slug) ? 'coming_soon' : entitled.has(slug) ? 'active' : 'none']));
 }
 
-async function loadProductStates(client, userId, now) {
-  const [catalog, subscriptions, grants] = await Promise.all([
+async function loadEntitlements(client, userId, now) {
+  const [catalog, subscriptions, grants, lifetime] = await Promise.all([
     client.from('myops_products').select('slug,launch_status'),
     client.from('myops_subscriptions').select('personal_user_id,organization_id,product_slug,is_complete_bundle,status,current_period_end'),
     client.from('myops_app_grants').select('organization_id,product_slug').eq('user_id', userId),
+    client.from('myops_lifetime_entitlements').select('user_id,scope,status').eq('user_id', userId),
   ]);
   if (catalog.error || subscriptions.error || grants.error) return null;
-  return resolveProductStates({ userId, catalog: catalog.data || [], subscriptions: subscriptions.data || [], grants: grants.data || [], now });
+  // A failed lifetime read fails closed (no lifetime), e.g. before the Phase 3 SQL is approved.
+  const rows = lifetime.error ? [] : lifetime.data || [];
+  return {
+    products: resolveProductStates({ userId, catalog: catalog.data || [], subscriptions: subscriptions.data || [], grants: grants.data || [], lifetime: rows, now }),
+    lifetime: hasLifetime(userId, rows),
+  };
+}
+
+async function loadProductStates(client, userId, now) {
+  return (await loadEntitlements(client, userId, now))?.products ?? null;
 }
 
 function profileFrom(user) {
@@ -218,7 +237,9 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         clearAll();
         return reply(200, { next: '/' });
       }
-      if (!['account', 'reset', 'profile', 'session', 'launch'].includes(action)) return reply(400, { error: 'Unknown operation.' });
+      const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
+      if (action === 'founders') return reply(200, await payments.founders());
+      if (!['account', 'reset', 'profile', 'session', 'launch', 'checkout', 'admin_audit'].includes(action)) return reply(400, { error: 'Unknown operation.' });
       const active = saved[SESSION] && activityValid(secret, saved[ACTIVITY], now());
       const { data: identity, error: identityError } = active
         ? await client.auth.getUser(saved[SESSION]) : { data: {}, error: true };
@@ -231,13 +252,26 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       // Passive probes must not extend the inactivity window.
       if (!(action === 'session' && body.activity === false)) touch();
       if (action === 'session') {
-        const products = await loadProductStates(client, identity.user.id, now());
-        return reply(200, { signedIn: true, email: identity.user.email, products });
+        const entitlements = await loadEntitlements(client, identity.user.id, now());
+        return reply(200, { signedIn: true, email: identity.user.email, products: entitlements?.products ?? null, lifetime: entitlements?.lifetime ?? false });
+      }
+      if (action === 'checkout') {
+        // Founders 100 is scoped to Individual accounts until Business pricing is approved.
+        if (profileFrom(identity.user)?.account_type !== 'personal') {
+          return reply(403, { error: 'Founders 100 and All Apps checkout are available to Individual accounts only.' });
+        }
+        const result = await payments.checkout({ userId: identity.user.id, plan: body.plan, origin });
+        return reply(result.status, result.body);
+      }
+      if (action === 'admin_audit') {
+        const result = await payments.audit({ userId: identity.user.id });
+        return reply(result.status, result.body);
       }
       if (action === 'launch') {
-        if (!PRODUCT_SLUGS.includes(body.product)) return reply(400, { error: 'Unknown product.' });
+        if (typeof body.product !== 'string' || !SLUG.test(body.product)) return reply(400, { error: 'Unknown product.' });
         const products = await loadProductStates(client, identity.user.id, now());
         if (!products) return reply(503, { error: 'Subscription status is unavailable. Try again later.' });
+        if (!products[body.product]) return reply(400, { error: 'Unknown product.' });
         if (products[body.product] !== 'active') return reply(403, { error: 'An active subscription is required for this application.' });
         const target = env[`MYOPS_APP_URL_${body.product.toUpperCase()}`];
         if (typeof target !== 'string' || !/^https:\/\/[^\s]+$/.test(target)) {
@@ -273,8 +307,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         return reply(200, { next: '/account' });
       }
       // Auth metadata is user-editable and descriptive only; it never grants access.
-      const products = await loadProductStates(client, identity.user.id, now());
-      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user), products });
+      const entitlements = await loadEntitlements(client, identity.user.id, now());
+      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user), products: entitlements?.products ?? null, lifetime: entitlements?.lifetime ?? false });
     } catch {
       // Never log SDK errors, credentials, request bodies, cookies or callback codes.
       return reply(500, { error: 'Authentication request failed. Please try again.' });

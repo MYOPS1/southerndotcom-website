@@ -1,34 +1,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
+import { authRequest } from './authRequest';
 
 const PROBE_INTERVAL_MS = 60 * 1000;
-const SignedOut = { status: 'ready', signedIn: false, products: null };
-
-async function authRequest(action, fields = {}) {
-  let response;
-  try {
-    response = await fetch('/api/auth', {
-      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...fields }),
-    });
-  } catch { throw new Error('Unable to connect. Check your connection and try again.'); }
-  let result;
-  try { result = await response.json(); }
-  catch { throw new Error('Authentication service returned an unexpected response. Reload this Preview and try again.'); }
-  if (!response.ok) {
-    const error = new Error(result.error || 'Request failed.');
-    error.status = response.status;
-    throw error;
-  }
-  return result;
-}
+const SignedOut = { status: 'ready', signedIn: false, products: null, lifetime: false };
 
 const SessionContext = createContext({ ...SignedOut, enabled: false, refresh: async () => {}, logout: async () => {} });
 
 // Browser state is display-only. The server re-validates identity and subscriptions for every
 // protected operation, so editing this state can never unlock an application.
 export function SessionProvider({ enabled, children }) {
-  const [state, setState] = useState(enabled ? { status: 'loading', signedIn: false, products: null } : SignedOut);
+  const [state, setState] = useState(enabled ? { status: 'loading', signedIn: false, products: null, lifetime: false } : SignedOut);
   const lastActivity = useRef(0);
 
   const refresh = useCallback(async (activity = true) => {
@@ -36,7 +18,7 @@ export function SessionProvider({ enabled, children }) {
     try {
       const result = await authRequest('session', { activity });
       setState(result.signedIn
-        ? { status: 'ready', signedIn: true, email: result.email, products: result.products }
+        ? { status: 'ready', signedIn: true, email: result.email, products: result.products, lifetime: Boolean(result.lifetime) }
         : SignedOut);
     } catch {
       setState(SignedOut);
@@ -132,7 +114,7 @@ export function ProductAction({ product }) {
   }
   return (
     <div className="product-action">
-      <a className="btn btn-secondary" href={session.signedIn ? `/account#subscription-${product.slug}` : '/login'}>Subscribe</a>
+      <a className="btn btn-secondary" href={session.signedIn ? '/#founders' : '/login'}>Subscribe</a>
     </div>
   );
 }

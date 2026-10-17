@@ -1096,3 +1096,17 @@ select {
 .product-action p { margin: 0; font-size: 0.78rem; color: #b3261e; }
 .product-action p:empty { display: none; }
 @media (max-width: 820px) { .nav-auth { flex-wrap: wrap; } }
+
+/* Founders 100 promotion and admin audit: additive, reuses existing section and button styles. */
+.founders-card { padding: 32px; border-radius: 24px; background: linear-gradient(135deg, #071b49, #1f4fd8); color: #fff; display: grid; gap: 12px; }
+.founders-card h2, .founders-card p { color: inherit; margin: 0; }
+.founders-card .section-label { opacity: 0.8; }
+.founders-count strong { font-size: 2rem; }
+.founders-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.founders-card .btn { justify-self: start; cursor: pointer; border: 0; }
+.founders-note { font-size: 0.85rem; opacity: 0.85; }
+.founders-error { color: #ffd2cf; }
+.founders-error:empty { display: none; }
+.audit-scroll { overflow-x: auto; }
+.audit-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.audit-table th, .audit-table td { padding: 6px 10px; border-bottom: 1px solid rgba(7, 27, 73, 0.12); text-align: left; white-space: nowrap; }

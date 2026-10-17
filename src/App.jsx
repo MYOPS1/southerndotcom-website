@@ -2,6 +2,8 @@ import PropTypes from 'prop-types';
 import { AccountPreview } from './AccountPreview';
 import { AuthPortal } from './AuthPortal';
 import { AuthNav, ProductAction, SessionProvider } from './session';
+import { FoundersPromo } from './FoundersPromo';
+import { AdminAudit } from './AdminAudit';
 import { useEffect, useState } from 'react';
 import {
   AcceptableUsePage,
@@ -137,6 +139,7 @@ const routes = {
   '/account/update-password': () => <PageShell>{portal('reset')}</PageShell>,
   '/auth/callback': () => <PageShell>{portal('callback')}</PageShell>,
   '/account': () => <PageShell>{portal('dashboard')}</PageShell>,
+  '/admin/audit': () => <PageShell>{import.meta.env.MODE === 'preview-auth' ? <AdminAudit /> : portal('login')}</PageShell>,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
   '/solutions/opsfinance': SolutionPage,
@@ -499,6 +502,8 @@ function LandingPage() {
           </div>
         </div>
       </section>
+
+      <FoundersPromo />
 
       <section className="content-section">
         <div className="container">
