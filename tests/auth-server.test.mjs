@@ -231,3 +231,20 @@ test('invalid upstream email returns actionable 400 without leaking upstream det
   assert.deepEqual(result.data, { error: 'Use a valid email address with a real inbox. Example and test domains are not supported.' });
   assert.deepEqual(entries, [{ event: 'myops_signup_error', code: 'email_address_invalid', status: 400 }]);
 });
+
+test('recovery does not report email success for upstream outages or disabled email provider', async () => {
+  for (const [error, expected] of [
+    [{ status: 500, message: 'private SMTP detail' }, 502],
+    [{ status: 503 }, 502],
+    [{ code: 'email_provider_disabled', status: 400 }, 503],
+    [{ status: 429 }, 429],
+  ]) {
+    const result = await run({ action: 'forgot', email: user.email }, {
+      client: mock({ resetPasswordForEmail: async () => ({ error }) }),
+    });
+    assert.equal(result.code, expected);
+    assert.ok(result.data.error);
+    assert.equal(result.data.message, undefined);
+    assert.ok(!JSON.stringify(result.data).includes('private SMTP detail'));
+  }
+});

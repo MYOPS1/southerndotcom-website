@@ -80,16 +80,17 @@ and Supabase allowlist could not be verified from this sandbox. Before sending a
 email, owner must verify `/auth/callback` loads on the branch alias and `/api/auth`
 returns JSON (503 is expected until configured), then configure Supabase.
 
-1. Vercel metadata check on 2026-10-16: the foundation branch has only
-   `VITE_SUPABASE_URL`; the publishable key is NOT present in that Preview scope.
-   The supplied dashboard shows a publishable-key variable in **Production**. That
-   contradicts the owner report; values were NOT read, and Production was not altered.
-   In this task environment on 2026-10-17, `VERCEL_ENV`, `VERCEL_BRANCH_URL`,
-   `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` were all unset. No
-   Vercel project credentials or key values were available, so current remote
-   Preview scopes could not be independently queried here.
-2. On the implementation branch (or after merge, the foundation branch), add BOTH
-   Preview-only branch-scoped variables via Project > Settings > Environment Variables:
+1. Rechecked through authenticated Vercel CLI on 2026-10-17 at commit `92cb955`:
+   `VITE_SUPABASE_URL` is scoped to Preview branch `vercel-agent/myops-server-auth`;
+   `VITE_SUPABASE_PUBLISHABLE_KEY` is Preview-wide and inherited by this branch.
+   A protected `vercel env run` check returned only booleans: staging URL matches
+   the fixed project, and the key has the required publishable prefix. No values
+   were printed or committed. Key/project association remains unverified. Deployment
+   `dpl_HLZSDK4cAyfCta8iapf3rGpTN6xY` is Ready, Preview, with `api/auth` present.
+   This verifies current environment configuration, not end-to-end auth behavior.
+2. Both variables are currently available to the implementation branch. If the owner
+   changes the target branch, ensure both remain available in Preview via
+   Project > Settings > Environment Variables:
    https://vercel.com/mohd-syaiful-nizam1/southerndotcom-website/settings/environment-variables
    `VITE_SUPABASE_URL=https://uhuukcztdifvpjuopdea.supabase.co` and
    `VITE_SUPABASE_PUBLISHABLE_KEY` copied directly from Supabase Connect or Settings >
@@ -196,3 +197,37 @@ clients. Do not claim these tests pass based on unit mocks/build success.
 - https://supabase.com/docs/reference/javascript/auth
 - https://supabase.com/docs/guides/database/functions
 - https://vercel.com/docs/environment-variables/system-environment-variables
+
+## Issue #11 follow-up — 2026-10-17
+
+Recovery previously returned HTTP 200 after upstream 5xx mail failures. A regression
+reproduced 200 instead of 502. Recovery now reports generic 502 for upstream 5xx,
+503 for disabled email provider, and retains 429 throttling and account-specific
+non-enumerating responses. No upstream messages are exposed.
+
+Verification: 30 tests pass, lint passes, both Production-safe local build and
+Preview-auth local build pass. These are mocked/local checks, not live SMTP or
+browser evidence. npm ci reports 1 moderate and 3 high vulnerabilities; no unrelated
+upgrades were attempted. No Production settings/deployment or SQL was changed.
+
+Live Register → Email Verification → Login → Dashboard, logout and recovery remain
+NOT RUN: the session has no browser automation, deployment HTTP access, authenticated
+Supabase dashboard, or owner-controlled test inbox. No Supabase Auth setting has
+been verified. The owner must check email provider + Confirm Email, SMTP delivery,
+exact callback allowlist above and standard ConfirmationURL email templates in the
+dedicated staging project. Do not disable confirmation to bypass the blocker.
+
+Owner acceptance sequence on the trusted branch alias:
+1. Register a new real staging inbox, verify no authenticated dashboard before
+   confirmation, then open its email in the same browser and verify account details.
+2. Sign out, verify account API rejects the missing cookie, then sign in; wrong
+   credentials and an unconfirmed user must remain rejected.
+3. Request recovery, open in the initiating browser, set a new password, verify
+   redirect to login and that the old password fails/new password succeeds.
+4. Verify expired/reused links fail, foreign Origin/Host requests fail, and cookies
+   are HttpOnly/Secure/SameSite=Lax with no browser localStorage session.
+5. Record sanitized statuses only; do not share passwords, cookies, codes or links.
+
+Session limitations remain: no refresh token storage, at most one-hour access cookie,
+no guaranteed immediate revocation of issued JWTs, and no server-enforced 15-minute
+inactivity. These are security release blockers, not tests that passed.

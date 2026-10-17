@@ -143,6 +143,13 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         if (!validEmail) return reply(400, { error: 'Enter a valid email address.' });
         const { error } = await client.auth.resetPasswordForEmail(body.email, { redirectTo: callback });
         if (error?.status === 429) return reply(429, { error: 'Please wait before trying again.' });
+        if (error?.code === 'email_provider_disabled') {
+          return reply(503, { error: 'Email recovery is currently unavailable. Contact the Preview owner.' });
+        }
+        if (error?.status >= 500) {
+          return reply(502, { error: 'Recovery could not be completed. Please try again later or contact the Preview owner.' });
+        }
+        // Keep account-specific failures indistinguishable to avoid email enumeration.
         return reply(200, { message: 'If the address is registered, a recovery email will arrive. Open it in this browser.' });
       }
       if (action === 'callback') {
