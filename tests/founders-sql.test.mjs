@@ -399,6 +399,16 @@ async function liveSession(user, app = 'opsp') {
   return (await call(`select public.myops_redeem_app_ticket(${q(app)}, ${q(hash)})`)).session_id;
 }
 const validate = (id, touch = false) => call(`select public.myops_validate_app_session(${q(id)}, 'opsp', 'opsp', ${touch})`);
+async function resetRollbackState() {
+  await sql(`delete from public.myops_app_audit; delete from public.myops_app_sessions; delete from public.myops_app_tickets; delete from public.myops_app_nonces; delete from public.myops_app_rate_limits; delete from public.myops_revocation_requests; delete from public.myops_login_sessions;`);
+  await sql(`update public.myops_app_clients set enabled = false;`);
+  await applyFile('202610170001_myops_app_access.sql');
+  await applyFile('202610170002_myops_login_sessions.sql');
+  await sql('grant execute on all functions in schema public to service_role');
+  await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
+    values ('opsp', 'opsp', ${q(edPem())}, true)
+    on conflict (app_id) do update set product_slug = excluded.product_slug, public_key_current = excluded.public_key_current, enabled = true;`);
+}
 
 test('regression H-2: validation polling never extends inactivity; asserted activity does', { skip }, async () => {
   const id = await liveSession(await newUser());
@@ -649,7 +659,71 @@ test('login sessions: clients cannot reach tables or functions and the proposal 
   assert.doesNotMatch(rollback, /cron\./i);
 });
 
+test('rollback safety: 0002 rollback revokes stale, revoked and evicted login-bound sessions before dropping the binding', async () => {
+  if (skip) return;
+  await resetRollbackState();
+  const user = await newUser();
+  const login = await svc(`select public.myops_login_start(${q(user)})`);
+  const hash = ticketHash();
+  assert.equal((await issue(user, 'opsp', hash, login)).status, 'issued');
+  const session = (await call(`select public.myops_redeem_app_ticket('opsp', ${q(hash)})`)).session_id;
+  await svc(`update public.myops_login_sessions set revoked_at = now() - interval '1 minute', ended_reason = 'inactivity' where id = ${q(login)}`);
+  await svc(`update public.myops_app_sessions set revoked_at = now() - interval '30 seconds', ended_reason = 'myops_logout' where id = ${q(session)}`);
+  await applyFile('202610170002_myops_login_sessions_rollback.sql');
+  assert.equal(await svc(`select count(*) from public.myops_app_sessions where revoked_at is null`), '0');
+  assert.equal(await svc(`select count(*) from public.myops_app_tickets where revoked_at is null and used_at is null`), '0');
+  assert.equal(await sql(`select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'myops_app_sessions' and column_name = 'login_session_id'`), '0');
+  await applyFile('202610170002_myops_login_sessions.sql');
+  await sql('grant execute on all functions in schema public to service_role');
+  await applyFile('202610170002_myops_login_sessions.sql');
+});
+
+test('rollback safety: 0001 rollback blocks live app access and only succeeds once it is clean', async () => {
+  if (skip) return;
+  await resetRollbackState();
+  const user = await newUser();
+  const app = 'opsp';
+  const key = q(edPem());
+  await sql(`insert into public.myops_app_clients(app_id, product_slug, public_key_current, enabled)
+    values (${q(app)}, ${q(app)}, ${key}, true)
+    on conflict (app_id) do update set product_slug = excluded.product_slug, public_key_current = excluded.public_key_current, enabled = true`);
+  const hash = ticketHash();
+  await issue(user, app, hash);
+  try {
+    await applyFile('202610170001_myops_app_access_rollback.sql');
+    assert.fail('rollback should be blocked while app access is still enabled');
+  } catch (err) {
+    const text = `${err.stderr ?? ''}\n${err.message ?? ''}`;
+    assert.match(text, /rollback blocked/i);
+  }
+  await sql('update public.myops_app_clients set enabled = false;');
+  await svc(`update public.myops_app_tickets set revoked_at = now(), used_at = now() where ticket_hash = ${q(hash)}`);
+  await svc(`update public.myops_app_sessions set revoked_at = now(), ended_reason = 'admin_revoked' where user_id = ${q(user)} and app_id = ${q(app)}`);
+  await applyFile('202610170001_myops_app_access_rollback.sql');
+  assert.equal(await sql(`select count(*) from information_schema.tables where table_schema = 'public' and table_name = 'myops_app_clients'`), '0');
+  await applyFile('202610170001_myops_app_access.sql');
+});
+
+test('concurrency safety: applying the 0002 rollback twice does not resurrect any app sessions', async () => {
+  if (skip) return;
+  await resetRollbackState();
+  const user = await newUser();
+  const login = await svc(`select public.myops_login_start(${q(user)})`);
+  const hash = ticketHash();
+  await issue(user, 'opsp', hash, login);
+  const session = (await call(`select public.myops_redeem_app_ticket('opsp', ${q(hash)})`)).session_id;
+  await Promise.all([
+    applyFile('202610170002_myops_login_sessions_rollback.sql'),
+    applyFile('202610170002_myops_login_sessions_rollback.sql')
+  ]);
+  assert.equal(await svc(`select count(*) from public.myops_app_sessions where revoked_at is null`), '0');
+  assert.equal((await validate(session)).active, false, 'dead app sessions stay dead after duplicate rollback');
+  await applyFile('202610170002_myops_login_sessions.sql');
+  await sql('grant execute on all functions in schema public to service_role');
+});
+
 test('login sessions: rollback restores the 0001 behaviour and the proposal re-applies cleanly', { skip }, async () => {
+  await resetRollbackState();
   await applyFile('202610170002_myops_login_sessions_rollback.sql');
   await applyFile('202610170002_myops_login_sessions_rollback.sql');
   assert.equal(await sql(`select count(*) from pg_proc where proname in ('myops_login_start','myops_sweep_logins','myops_login_end')`), '0');

@@ -5,6 +5,47 @@
 
 begin;
 
+select pg_advisory_xact_lock(hashtextextended('myops:rollback:0002', 0));
+
+do $$
+declare v_table_exists boolean; v_has_session_login_session_id boolean; v_has_ticket_login_session_id boolean;
+begin
+  select exists (
+    select 1 from information_schema.tables where table_schema = 'public' and table_name = 'myops_login_sessions'
+  ) into v_table_exists;
+
+  if not v_table_exists then
+    raise notice 'myops_login_sessions already rolled back; nothing to do';
+    return;
+  end if;
+
+  select exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'myops_app_sessions' and column_name = 'login_session_id'
+  ) into v_has_session_login_session_id;
+
+  select exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'myops_app_tickets' and column_name = 'login_session_id'
+  ) into v_has_ticket_login_session_id;
+
+  if v_has_session_login_session_id then
+    update public.myops_app_sessions s
+    set revoked_at = now(), ended_reason = coalesce(s.ended_reason, 'myops_logout')
+    where s.login_session_id is not null and s.revoked_at is null;
+  end if;
+
+  if v_has_ticket_login_session_id then
+    update public.myops_app_tickets t
+    set revoked_at = now()
+    where t.login_session_id is not null and t.used_at is null and t.revoked_at is null;
+  end if;
+
+  update public.myops_login_sessions
+  set revoked_at = coalesce(revoked_at, now()), ended_reason = coalesce(ended_reason, 'admin')
+  where revoked_at is null;
+end $$;
+
 drop function if exists public.myops_sweep_logins(integer);
 drop function if exists public.myops_enqueue_revocation(uuid, uuid, text);
 drop function if exists public.myops_login_end_all(uuid, text);
