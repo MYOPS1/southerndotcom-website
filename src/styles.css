@@ -1096,3 +1096,50 @@ select {
 .product-action p { margin: 0; font-size: 0.78rem; color: #b3261e; }
 .product-action p:empty { display: none; }
 @media (max-width: 820px) { .nav-auth { flex-wrap: wrap; } }
+
+/* Founders 100 promotion and admin audit: additive, reuses existing section and button styles. */
+.founders-card { padding: 32px; border-radius: 24px; background: linear-gradient(135deg, #ff5fa9 0%, #ff3d8d 35%, #ff8d2b 72%, #8d4dff 100%); color: #fff; display: grid; gap: 12px; }
+.founders-card h2, .founders-card p { color: inherit; margin: 0; }
+.founders-card .section-label { opacity: 0.8; }
+.founders-count strong { font-size: 2rem; }
+.founders-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.founders-card .btn { justify-self: start; cursor: pointer; border: 0; }
+.founders-note { font-size: 0.85rem; opacity: 0.85; }
+.founders-error { color: #ffd2cf; }
+.founders-error:empty { display: none; }
+.audit-scroll { overflow-x: auto; }
+.audit-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.audit-table th, .audit-table td { padding: 6px 10px; border-bottom: 1px solid rgba(7, 27, 73, 0.12); text-align: left; white-space: nowrap; }
+.founders-proposed { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 0.9rem; }
+.founders-proposed .btn { margin-left: 10px; padding: 0.2rem 0.7rem; font-size: 0.75rem; opacity: 0.6; cursor: not-allowed; }
+.founders-card select { padding: 0.5rem; border-radius: 8px; }
+
+/* Homepage refinement: compact layout only. Brand palette and artwork are untouched. */
+.apps-section { padding-bottom: 24px; }
+.product-card { min-height: 400px; }
+.product-desc { line-height: 1.5; }
+.founders-promo { padding-top: 24px; }
+.founders-promo h2 { margin: 4px 0 16px; font-size: clamp(1.4rem, 2.4vw, 2rem); letter-spacing: -0.03em; }
+.pricing-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.price-card { display: grid; align-content: start; gap: 8px; padding: 20px; border-radius: 22px; border: 1px solid rgba(7, 27, 73, 0.08); background: #fffdfa; color: #071b49; box-shadow: 0 10px 24px rgba(28, 34, 56, 0.05); }
+.price-card h3 { margin: 0; font-size: 1.15rem; }
+.price-card p { margin: 0; font-size: 0.92rem; line-height: 1.5; color: var(--muted); }
+.price-card .price-amount { font-size: 1.8rem; font-weight: 800; color: #071b49; letter-spacing: -0.03em; }
+.price-card .price-amount span { font-size: 0.9rem; font-weight: 600; color: var(--muted); }
+.price-card .btn { justify-self: start; cursor: pointer; border: 0; }
+.price-card-featured { background: linear-gradient(135deg, #ff5fa9 0%, #ff3d8d 35%, #ff8d2b 72%, #8d4dff 100%); color: #fff; }
+.price-card-featured h3, .price-card-featured p, .price-card-featured .price-amount, .price-card-featured .price-amount span { color: #fff; }
+.price-card-muted { opacity: 0.85; }
+.price-card-muted .price-amount { font-size: 1.1rem; }
+.price-card .founders-note, .price-card .founders-count { color: inherit; }
+.price-card .founders-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.founders-promo .founders-proposed { list-style: none; margin: 16px 0 8px; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.founders-promo .founders-proposed .btn { margin-left: 0; padding: 0.35rem 0.9rem; font-size: 0.78rem; opacity: 0.6; cursor: not-allowed; }
+.founders-promo > .container > .founders-note { color: var(--muted); }
+.founders-promo .founders-error { color: #b3261e; }
+@media (max-width: 1024px) { .founders-promo .founders-proposed { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) {
+  .pricing-cards { grid-template-columns: 1fr; }
+  .founders-promo .founders-proposed { grid-template-columns: 1fr 1fr; }
+  .product-card { min-height: 0; padding-bottom: 76px; }
+}

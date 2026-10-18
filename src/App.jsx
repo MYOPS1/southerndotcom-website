@@ -2,6 +2,8 @@ import PropTypes from 'prop-types';
 import { AccountPreview } from './AccountPreview';
 import { AuthPortal } from './AuthPortal';
 import { AuthNav, ProductAction, SessionProvider } from './session';
+import { FoundersPromo } from './FoundersPromo';
+import { AdminAudit } from './AdminAudit';
 import { useEffect, useState } from 'react';
 import {
   AcceptableUsePage,
@@ -23,16 +25,6 @@ const companyDetails = {
 
 const products = [
   {
-    slug: 'opsp',
-    name: 'OpsPS',
-    tag: ['Personal Shopper', 'Operations'],
-    icon: 'PS',
-    accent: 'pink',
-    art: 'opsps',
-    href: '/solutions/opsp',
-    summary: 'Support product, trip, order and customer operations with a streamlined, data-rich workflow.',
-  },
-  {
     slug: 'opsfinance',
     name: 'OpsFinance',
     tag: ['Accounting &', 'Financial Management'],
@@ -40,7 +32,7 @@ const products = [
     accent: 'purple',
     art: 'opsfinance',
     href: '/solutions/opsfinance',
-    summary: 'Keep financial data, cash flow and accountability aligned across your operations.',
+    summary: 'Keep accounting, cash flow and accountability aligned.',
   },
   {
     slug: 'opsflow',
@@ -50,17 +42,17 @@ const products = [
     accent: 'blue',
     art: 'opsflow',
     href: '/solutions/opsflow',
-    summary: 'Automate processes and handoffs so teams can move faster with less operational noise.',
+    summary: 'Automate processes and handoffs to move faster.',
   },
   {
-    slug: 'opswms',
-    name: 'OpsWMS',
-    tag: ['Warehouse', 'Management System'],
-    icon: 'WM',
-    accent: 'teal',
-    art: 'opswms',
-    comingSoon: true,
-    summary: 'Manage warehouse inventory, pallet locations, inbound, outbound and stock accuracy.',
+    slug: 'opsp',
+    name: 'OpsPS',
+    tag: ['Personal Shopper', 'Operations'],
+    icon: 'PS',
+    accent: 'pink',
+    art: 'opsps',
+    href: '/solutions/opsp',
+    summary: 'Manage products, trips, orders and customers in one workflow.',
   },
   {
     slug: 'opshr',
@@ -70,7 +62,17 @@ const products = [
     accent: 'orange',
     art: 'opshr',
     comingSoon: true,
-    summary: 'Manage employee records, attendance, leave and HR operations in one place.',
+    summary: 'Manage employee records, attendance and leave.',
+  },
+  {
+    slug: 'opswms',
+    name: 'OpsWMS',
+    tag: ['Warehouse', 'Management System'],
+    icon: 'WM',
+    accent: 'teal',
+    art: 'opswms',
+    comingSoon: true,
+    summary: 'Track warehouse stock, locations and movements.',
   },
 ];
 
@@ -137,6 +139,7 @@ const routes = {
   '/account/update-password': () => <PageShell>{portal('reset')}</PageShell>,
   '/auth/callback': () => <PageShell>{portal('callback')}</PageShell>,
   '/account': () => <PageShell>{portal('dashboard')}</PageShell>,
+  '/admin/audit': () => <PageShell>{import.meta.env.MODE === 'preview-auth' ? <AdminAudit /> : portal('login')}</PageShell>,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
   '/solutions/opsfinance': SolutionPage,
@@ -463,7 +466,7 @@ function LandingPage() {
               You Work
             </h1>
             <p>
-              Practical business technology to help you manage, sell, operate and grow — all in one ecosystem.
+              Practical business technology to manage, sell, operate and grow — in one ecosystem.
             </p>
             <div className="hero-actions">
               <a href="/solutions" className="btn btn-primary hero-cta">
@@ -483,30 +486,9 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="trust-band">
-        <div className="container trust-grid">
-          <div>
-            <strong>One ecosystem</strong>
-            <span>Operations, commerce, finance and workflows connected.</span>
-          </div>
-          <div>
-            <strong>Modern operations</strong>
-            <span>Built for growing businesses that need clarity and speed.</span>
-          </div>
-          <div>
-            <strong>Simple support</strong>
-            <span>Contact the team through phone, email or the contact page.</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="content-section">
+      <section className="content-section apps-section" id="applications">
         <div className="container">
-          <SectionIntro
-            label="Solutions"
-            title="Built for the way modern teams operate"
-            text="MYOPS connects business systems so product, service, financial and operational teams can act in one shared operating layer."
-          />
+          <SectionIntro label="Our Applications" title="Built for the way modern teams operate" />
 
           <div className="product-grid">
             {products.map((product) => (
@@ -544,6 +526,8 @@ function LandingPage() {
           </div>
         </div>
       </section>
+
+      <FoundersPromo />
 
       <section className="content-section alt-panel">
         <div className="container two-column">
@@ -595,22 +579,6 @@ function LandingPage() {
                 <p>Practical digital support built around the way your business operates.</p>
               </div>
             ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="content-section">
-        <div className="container pricing-teaser">
-          <div>
-            <SectionIntro
-              label="Business-ready"
-              title="Choose the right MYOPS path for your operations"
-              text="Whether you are streamlining order operations, marketplace activity or finance and workflow coordination, MYOPS is designed to scale with your business."
-            />
-          </div>
-          <div className="cta-panel">
-            <a href="/pricing" className="btn btn-primary">Review pricing</a>
-            <a href="/contact" className="btn btn-secondary">Talk to the team</a>
           </div>
         </div>
       </section>

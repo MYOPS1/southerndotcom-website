@@ -1,7 +1,10 @@
 {
   "version": 2,
   "routes": [
+    { "src": "/api/app/redeem", "dest": "/api/app/redeem" },
+    { "src": "/api/app/entitlement", "dest": "/api/app/entitlement" },
     { "src": "/api/auth", "dest": "/api/auth" },
+    { "src": "/api/toyyibpay-callback", "dest": "/api/toyyibpay-callback" },
     { "src": "/auth/callback", "headers": { "Referrer-Policy": "no-referrer", "Cache-Control": "no-store" }, "dest": "/index.html" },
     { "handle": "filesystem" },
     { "src": "/(.*)", "dest": "/index.html" }

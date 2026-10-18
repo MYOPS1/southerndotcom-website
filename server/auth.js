@@ -1,10 +1,19 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
+import { createAppAccess } from './app-access.js';
+import { createPayments } from './payments.js';
+import { PRODUCT_SLUGS, hasLifetime, resolveProductStates } from './entitlements.js';
 
 const SESSION = '__Host-myops-access';
 const VERIFIER = '__Host-myops-pkce';
 const ACTIVITY = '__Host-myops-activity';
+const IDENTITY = '__Host-myops-identity';
+const PENDING = '__Host-myops-revoke';
+const LOGIN = '__Host-myops-login';
+const PENDING_MAX_MS = 24 * 60 * 60 * 1000;
+const IDENTITY_MAX_MS = 12 * 60 * 60 * 1000;
 export const INACTIVITY_MS = 15 * 60 * 1000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROJECT = 'https://uhuukcztdifvpjuopdea.supabase.co';
 
 function cookies(req) {
@@ -33,40 +42,82 @@ function activityValid(secret, cookie, now) {
   return age >= 0 && age <= INACTIVITY_MS;
 }
 
-export const PRODUCT_SLUGS = ['opsp', 'opsfinance', 'opsflow', 'opswms', 'opshr'];
-
-// Pure entitlement rules. Row visibility is enforced by Supabase RLS for the caller's JWT;
-// these rules additionally fail closed on status, expiry, catalog state and grants.
-export function resolveProductStates({ userId, catalog, subscriptions, grants, now }) {
-  const entitled = new Set();
-  const live = new Set(catalog.filter((item) => item.launch_status === 'live').map((item) => item.slug));
-  for (const sub of subscriptions) {
-    if (sub.status !== 'active') continue;
-    if (sub.current_period_end && !(Date.parse(sub.current_period_end) > now)) continue;
-    if (sub.personal_user_id) {
-      if (sub.personal_user_id !== userId) continue;
-      if (sub.is_complete_bundle) live.forEach((slug) => entitled.add(slug));
-      else if (sub.product_slug) entitled.add(sub.product_slug);
-    } else if (sub.organization_id) {
-      for (const grant of grants) {
-        if (grant.organization_id === sub.organization_id && (sub.is_complete_bundle || grant.product_slug === sub.product_slug)) {
-          entitled.add(grant.product_slug);
-        }
-      }
-    }
-  }
-  return Object.fromEntries(PRODUCT_SLUGS.map((slug) => [slug,
-    !live.has(slug) ? 'coming_soon' : entitled.has(slug) ? 'active' : 'none']));
+// Server-signed identity bound to the verified login. It lets logout/expiry revoke app access
+// even after the Supabase access token has expired; the browser cannot forge or retarget it.
+export function signIdentity(secret, userId, issuedAt) {
+  const value = `${userId}.${issuedAt}`;
+  return `${value}.${createHmac('sha256', secret).update(`identity:${value}`).digest('base64url')}`;
 }
 
-async function loadProductStates(client, userId, now) {
-  const [catalog, subscriptions, grants] = await Promise.all([
+export function verifiedIdentity(secret, cookie, now) {
+  if (typeof cookie !== 'string' || cookie.length > 200) return null;
+  const [userId, issuedAt, mac, extra] = cookie.split('.');
+  if (extra !== undefined || !/^[A-Za-z0-9-]{1,64}$/.test(userId || '') || !/^\d{1,15}$/.test(issuedAt || '') || !mac) return null;
+  const expected = Buffer.from(signIdentity(secret, userId, issuedAt));
+  const actual = Buffer.from(cookie);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  const age = now - Number(issuedAt);
+  return age >= 0 && age <= IDENTITY_MAX_MS ? userId : null;
+}
+
+// Server-signed pointer to this browser's durable login-session record. It carries no authority by
+// itself: every use is re-checked in the database (live, unexpired, owned by the verified user).
+export function signLogin(secret, userId, loginSessionId, issuedAt) {
+  const value = `${userId}.${loginSessionId}.${issuedAt}`;
+  return `${value}.${createHmac('sha256', secret).update(`login:${value}`).digest('base64url')}`;
+}
+
+export function verifiedLogin(secret, cookie, now) {
+  if (typeof cookie !== 'string' || cookie.length > 300) return null;
+  const [userId, loginSessionId, issuedAt, mac, extra] = cookie.split('.');
+  if (extra !== undefined || !/^[A-Za-z0-9-]{1,64}$/.test(userId || '') || !UUID.test(loginSessionId || '')
+      || !/^\d{1,15}$/.test(issuedAt || '') || !mac) return null;
+  const expected = Buffer.from(signLogin(secret, userId, loginSessionId, issuedAt));
+  const actual = Buffer.from(cookie);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  const age = now - Number(issuedAt);
+  return age >= 0 && age <= IDENTITY_MAX_MS ? { userId, loginSessionId } : null;
+}
+
+// A server-signed marker that app-session revocation for this verified user has not yet succeeded.
+// It is only ever created from an identity the server already proved, and is retried until it succeeds.
+export function signPending(secret, userId, issuedAt) {
+  const value = `${userId}.${issuedAt}`;
+  return `${value}.${createHmac('sha256', secret).update(`pending:${value}`).digest('base64url')}`;
+}
+
+export function verifiedPending(secret, cookie, now) {
+  if (typeof cookie !== 'string' || cookie.length > 200) return null;
+  const [userId, issuedAt, mac, extra] = cookie.split('.');
+  if (extra !== undefined || !/^[A-Za-z0-9-]{1,64}$/.test(userId || '') || !/^\d{1,15}$/.test(issuedAt || '') || !mac) return null;
+  const expected = Buffer.from(signPending(secret, userId, issuedAt));
+  const actual = Buffer.from(cookie);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  const age = now - Number(issuedAt);
+  return age >= 0 && age <= PENDING_MAX_MS ? userId : null;
+}
+
+export { PRODUCT_SLUGS, hasLifetime, resolveProductStates };
+const SLUG = /^[a-z0-9_]{1,32}$/;
+
+async function loadEntitlements(client, userId, now) {
+  const [catalog, subscriptions, grants, lifetime] = await Promise.all([
     client.from('myops_products').select('slug,launch_status'),
     client.from('myops_subscriptions').select('personal_user_id,organization_id,product_slug,is_complete_bundle,status,current_period_end'),
     client.from('myops_app_grants').select('organization_id,product_slug').eq('user_id', userId),
+    client.from('myops_lifetime_entitlements').select('user_id,scope,status').eq('user_id', userId),
   ]);
   if (catalog.error || subscriptions.error || grants.error) return null;
-  return resolveProductStates({ userId, catalog: catalog.data || [], subscriptions: subscriptions.data || [], grants: grants.data || [], now });
+  // A failed lifetime read fails closed (no lifetime), e.g. before the Phase 3 SQL is approved.
+  const rows = lifetime.error ? [] : lifetime.data || [];
+  return {
+    products: resolveProductStates({ userId, catalog: catalog.data || [], subscriptions: subscriptions.data || [], grants: grants.data || [], lifetime: rows, now }),
+    lifetime: hasLifetime(userId, rows),
+  };
+}
+
+async function loadProductStates(client, userId, now) {
+  return (await loadEntitlements(client, userId, now))?.products ?? null;
 }
 
 function profileFrom(user) {
@@ -89,7 +140,7 @@ const SIGNUP_ERROR_CODES = new Set([
   'hook_payload_invalid_content_type', 'request_timeout',
 ]);
 
-export function createAuthHandler({ env = process.env, clientFactory = createClient, transport = fetch, now = Date.now,
+export function createAuthHandler({ env = process.env, clientFactory = createClient, appAccessFactory = createAppAccess, transport = fetch, now = Date.now,
   diagnostic = (entry) => console.warn(JSON.stringify(entry)) } = {}) {
   return async function handler(req, res) {
     res.setHeader('Cache-Control', 'private, no-store');
@@ -137,14 +188,21 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       ...(saved[SESSION] ? { global: { headers: { Authorization: `Bearer ${saved[SESSION]}` } } } : {}),
     });
     const touch = () => setCookie(ACTIVITY, signActivity(secret, now()), INACTIVITY_MS / 1000);
-    const clearAll = () => [SESSION, ACTIVITY, VERIFIER].forEach((name) => setCookie(name, '', 0));
-    const saveSession = async (session) => {
+    const cookieIdentity = () => verifiedIdentity(secret, saved[IDENTITY], now());
+    const clearAll = () => [SESSION, ACTIVITY, IDENTITY, LOGIN, VERIFIER].forEach((name) => setCookie(name, '', 0));
+    const saveSession = async (session, access) => {
       if (!session?.access_token) return false;
       const { data, error } = await client.auth.getUser(session.access_token);
       if (error || !data.user?.email_confirmed_at) return false;
       const ttl = Math.min(3600, Math.floor(session.expires_at - Date.now() / 1000));
       if (!(ttl > 0) || session.access_token.length > 3500) return false;
       setCookie(SESSION, session.access_token, ttl);
+      setCookie(IDENTITY, signIdentity(secret, data.user.id, now()), IDENTITY_MAX_MS / 1000);
+      // Durable server-side login record. If it cannot be created, sign-in still works but app launch
+      // fails closed (no login cookie means no tickets).
+      const loginSessionId = await access.startLogin(data.user.id);
+      if (loginSessionId) setCookie(LOGIN, signLogin(secret, data.user.id, loginSessionId, now()), IDENTITY_MAX_MS / 1000);
+      else setCookie(LOGIN, '', 0);
       touch();
       return true;
     };
@@ -155,6 +213,36 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const validEmail = typeof body.email === 'string' && body.email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email);
       const validPassword = typeof body.password === 'string' && body.password.length >= 12 && body.password.length <= 128;
       const callback = `${origin}/auth/callback`;
+      const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
+      const appAccess = appAccessFactory({ env, adminFactory: clientFactory, now, project: PROJECT });
+      // Revocation targets only identities proven by the server (signed cookie or verified token).
+      // Revokes app access for every verified id plus any unresolved pending id. A failure is never
+      // reported as success: it leaves a signed pending marker so later requests retry it.
+      // A verified login cookie narrows revocation to this browser's login session; password reset and
+      // retries of an earlier failure are user-wide (a superset, never weaker).
+      const settleRevocation = async (reason, ...ids) => {
+        const login = verifiedLogin(secret, saved[LOGIN], now());
+        const pending = verifiedPending(secret, saved[PENDING], now());
+        const jobs = new Map();
+        for (const id of [...ids, login?.userId].filter(Boolean)) {
+          jobs.set(id, login && login.userId === id && reason !== 'password_reset'
+            ? { loginSessionId: login.loginSessionId, reason } : { reason });
+        }
+        if (pending) jobs.set(pending, { reason: jobs.get(pending)?.reason ?? 'logout' });
+        const targets = [...jobs.keys()];
+        const results = await Promise.allSettled(targets.map((id) => appAccess.revokeUserSessions(id, jobs.get(id))));
+        const failed = targets.filter((id, index) => results[index].status === 'rejected');
+        if (failed.length) setCookie(PENDING, signPending(secret, failed[0], now()), PENDING_MAX_MS / 1000);
+        else if (saved[PENDING]) setCookie(PENDING, '', 0);
+        return failed.length === 0;
+      };
+      // Retry an earlier failed revocation on every request, before anything else can start a session.
+      const pendingUser = verifiedPending(secret, saved[PENDING], now());
+      const pendingCleared = pendingUser ? await settleRevocation('logout') : true;
+      if (saved[PENDING] && !pendingUser) setCookie(PENDING, '', 0);
+      if (!pendingCleared && ['login', 'callback'].includes(action)) {
+        return reply(503, { error: 'Sign-in is temporarily unavailable. Try again shortly.' });
+      }
       if (action === 'register') {
         if (!validEmail || !validPassword || !['personal', 'business'].includes(body.accountType)
             || typeof body.displayName !== 'string' || body.displayName.trim().length < 1 || body.displayName.length > 120) {
@@ -163,6 +251,9 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         // Metadata is descriptive only. Never trust it for roles or authorization.
         const { data, error } = await client.auth.signUp({ email: body.email, password: body.password,
           options: { emailRedirectTo: callback, data: { display_name: body.displayName.trim(), account_type: body.accountType } } });
+        if (!error && data?.user?.id && data.user.identities?.length > 0) {
+          await payments.provisionProfile({ userId: data.user.id, displayName: body.displayName.trim(), accountType: body.accountType });
+        }
         if (error) {
           const entry = {
             event: 'myops_signup_error',
@@ -197,7 +288,7 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       if (action === 'login') {
         if (!validEmail || typeof body.password !== 'string' || body.password.length > 128) return reply(400, { error: 'Invalid email or password.' });
         const { data, error } = await client.auth.signInWithPassword({ email: body.email, password: body.password });
-        if (error || !await saveSession(data?.session)) return reply(401, { error: 'Invalid credentials or email not confirmed.' });
+        if (error || !await saveSession(data?.session, appAccess)) return reply(401, { error: 'Invalid credentials or email not confirmed.' });
         return reply(200, { next: '/' });
       }
       if (action === 'forgot') {
@@ -210,40 +301,79 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         if (typeof body.code !== 'string' || body.code.length > 2048 || !saved[VERIFIER]) return reply(400, { error: 'Invalid or expired link. Start again in this browser.' });
         const { data, error } = await client.auth.exchangeCodeForSession(body.code);
         setCookie(VERIFIER, '', 0);
-        if (error || !await saveSession(data?.session)) return reply(400, { error: 'Invalid or expired link. Start again.' });
+        if (error || !await saveSession(data?.session, appAccess)) return reply(400, { error: 'Invalid or expired link. Start again.' });
         return reply(200, { next: data.redirectType === 'recovery' ? '/account/update-password' : '/' });
       }
       if (action === 'logout') {
-        if (saved[SESSION]) await client.auth.admin.signOut(saved[SESSION], 'global');
         clearAll();
+        let current = null;
+        if (saved[SESSION]) {
+          try { current = (await client.auth.getUser(saved[SESSION])).data?.user ?? null; } catch { current = null; }
+        }
+        const signOut = saved[SESSION]
+          ? await Promise.allSettled([client.auth.admin.signOut(saved[SESSION], 'global')]) : [];
+        const revoked = await settleRevocation('logout', current?.id, cookieIdentity());
+        // A sign-out error for a token that is already invalid is harmless; app revocation must succeed.
+        const signOutFailed = signOut.length && current
+          && (signOut[0].status === 'rejected' || signOut[0].value?.error);
+        if (signOutFailed || !revoked) throw new Error('logout_failed');
         return reply(200, { next: '/' });
       }
-      if (!['account', 'reset', 'profile', 'session', 'launch'].includes(action)) return reply(400, { error: 'Unknown operation.' });
+      if (action === 'founders') return reply(200, await payments.founders());
+      if (!['account', 'reset', 'profile', 'session', 'launch', 'checkout', 'admin_audit'].includes(action)) return reply(400, { error: 'Unknown operation.' });
       const active = saved[SESSION] && activityValid(secret, saved[ACTIVITY], now());
-      const { data: identity, error: identityError } = active
+      const { data: identity, error: identityError } = saved[SESSION]
         ? await client.auth.getUser(saved[SESSION]) : { data: {}, error: true };
-      if (identityError || !identity.user?.email_confirmed_at) {
-        const expired = Boolean(saved[SESSION]);
+      if (!active || identityError || !identity.user?.email_confirmed_at) {
+        const expired = Boolean(saved[SESSION] || saved[IDENTITY]);
+        const knownUser = identity.user?.id;
         clearAll();
+        // MYOPS session ended (inactivity or expired/invalid token): app access ends with it.
+        // A failed revocation stays queued (signed pending marker); it must not turn into repeated errors here.
+        await settleRevocation('inactivity', knownUser, cookieIdentity());
         if (action === 'session') return reply(200, { signedIn: false });
         return reply(401, expired ? { error: 'Your session ended. Sign in again.', reason: 'inactive' } : { error: 'Sign in to continue.' });
       }
       // Passive probes must not extend the inactivity window.
-      if (!(action === 'session' && body.activity === false)) touch();
+      // Only genuine user activity is recorded server-side (30 s throttle); app polling never is.
+      const login = verifiedLogin(secret, saved[LOGIN], now());
+      const loginSessionId = login?.userId === identity.user.id ? login.loginSessionId : null;
+      if (!(action === 'session' && body.activity === false)) {
+        touch();
+        if (loginSessionId && await appAccess.touchLogin(identity.user.id, loginSessionId) === false) {
+          // The durable record says this login is over (expired, swept or revoked elsewhere).
+          clearAll();
+          await settleRevocation('inactivity', identity.user.id);
+          if (action === 'session') return reply(200, { signedIn: false });
+          return reply(401, { error: 'Your session ended. Sign in again.', reason: 'inactive' });
+        }
+      }
       if (action === 'session') {
-        const products = await loadProductStates(client, identity.user.id, now());
-        return reply(200, { signedIn: true, email: identity.user.email, products });
+        const entitlements = await loadEntitlements(client, identity.user.id, now());
+        return reply(200, { signedIn: true, email: identity.user.email, products: entitlements?.products ?? null, lifetime: entitlements?.lifetime ?? false });
+      }
+      if (action === 'checkout') {
+        // Eligibility (Individual-only) is decided inside the database from the server-owned
+        // profile; user-editable auth metadata is never consulted.
+        const result = await payments.checkout({ userId: identity.user.id, plan: body.plan, product: body.product, origin });
+        return reply(result.status, result.body);
+      }
+      if (action === 'admin_audit') {
+        const result = await payments.audit({ userId: identity.user.id });
+        return reply(result.status, result.body);
       }
       if (action === 'launch') {
-        if (!PRODUCT_SLUGS.includes(body.product)) return reply(400, { error: 'Unknown product.' });
+        if (typeof body.product !== 'string' || !SLUG.test(body.product)) return reply(400, { error: 'Unknown product.' });
         const products = await loadProductStates(client, identity.user.id, now());
         if (!products) return reply(503, { error: 'Subscription status is unavailable. Try again later.' });
+        if (!products[body.product]) return reply(400, { error: 'Unknown product.' });
         if (products[body.product] !== 'active') return reply(403, { error: 'An active subscription is required for this application.' });
-        const target = env[`MYOPS_APP_URL_${body.product.toUpperCase()}`];
-        if (typeof target !== 'string' || !/^https:\/\/[^\s]+$/.test(target)) {
-          return reply(503, { error: 'Application launch is not configured for this Preview.' });
-        }
-        return reply(200, { next: target });
+        // Tickets bind to a verified, live login-session record; without one, fail closed.
+        if (!loginSessionId) return reply(401, { error: 'Sign in again to launch applications.', reason: 'login_required' });
+        const launch = await appAccess.issueTicket({ userId: identity.user.id, product: body.product, loginSessionId });
+        if (launch?.status === 429) return reply(429, { error: 'Please wait before trying again.' });
+        if (!launch || launch.status !== 200) return reply(503, { error: 'Secure application launch is unavailable. Try again later.' });
+        return reply(200, { next: launch.next });
       }
       if (action === 'reset') {
         if (!validPassword) return reply(400, { error: 'Use a 12–128 character password.' });
@@ -254,8 +384,10 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
           body: JSON.stringify({ password: body.password }),
         });
         if (!updated.ok) return reply(400, { error: 'Password update failed. Request a new recovery link.' });
-        await client.auth.admin.signOut(saved[SESSION], 'global');
+        const signOut = await Promise.allSettled([client.auth.admin.signOut(saved[SESSION], 'global')]);
+        const revoked = await settleRevocation('password_reset', identity.user.id);
         clearAll();
+        if (!revoked || signOut[0].status === 'rejected' || signOut[0].value?.error) throw new Error('password_reset_revoke_failed');
         return reply(200, { next: '/login' });
       }
       if (action === 'profile') {
@@ -273,8 +405,8 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
         return reply(200, { next: '/account' });
       }
       // Auth metadata is user-editable and descriptive only; it never grants access.
-      const products = await loadProductStates(client, identity.user.id, now());
-      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user), products });
+      const entitlements = await loadEntitlements(client, identity.user.id, now());
+      return reply(200, { email: identity.user.email, profile: profileFrom(identity.user), products: entitlements?.products ?? null, lifetime: entitlements?.lifetime ?? false });
     } catch {
       // Never log SDK errors, credentials, request bodies, cookies or callback codes.
       return reply(500, { error: 'Authentication request failed. Please try again.' });

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthHandler, signActivity, resolveProductStates } from '../server/auth.js';
+import { createAuthHandler, signActivity, signIdentity, signLogin, verifiedLogin, verifiedIdentity, signPending, verifiedPending, resolveProductStates } from '../server/auth.js';
 import { createClient } from '@supabase/supabase-js';
 
 const origin = 'https://trusted-preview.vercel.app';
 const env = { VERCEL_ENV: 'preview', VERCEL_BRANCH_URL: 'trusted-preview.vercel.app', MYOPS_SESSION_SECRET: 's'.repeat(40),
   VITE_SUPABASE_URL: 'https://uhuukcztdifvpjuopdea.supabase.co', VITE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test_fixture' };
 const NOW = Date.now();
-const signedIn = (ageMs = 0) => `__Host-myops-access=test-access-token; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - ageMs)}`;
+const LOGIN_ID = '7c1f0a52-3b6e-4d58-9a41-0e2d5b8c9f13';
+const loginCookie = (id = user.id, loginId = LOGIN_ID, ageMs = 0) => `__Host-myops-login=${signLogin(env.MYOPS_SESSION_SECRET, id, loginId, NOW - ageMs)}`;
+const signedIn = (ageMs = 0) => `__Host-myops-access=test-access-token; __Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - ageMs)}; ${loginCookie()}`;
 const user = { id: 'test-user-a', email: 'staging@example.test', email_confirmed_at: '2026-01-01' };
 const session = { access_token: 'test-access-token', expires_at: Math.floor(Date.now() / 1000) + 3600 };
 function mock(overrides = {}) {
@@ -27,7 +29,9 @@ async function run(body, options = {}) {
     status(code) { this.code = code; return this; }, json(data) { this.data = data; return this; } };
   const req = { method: 'POST', headers: { host: 'trusted-preview.vercel.app', origin,
     'content-type': 'application/json', ...options.headers }, body, ...options.request };
-  await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()), transport: options.transport, now: () => NOW, diagnostic: options.diagnostic || (() => {}) })(req, res);
+  await createAuthHandler({ env: { ...env, ...options.env }, clientFactory: options.factory || (() => options.client || mock()),
+    appAccessFactory: options.appAccessFactory && ((args) => ({ startLogin: async () => LOGIN_ID, touchLogin: async () => true, ...options.appAccessFactory(args) })),
+    transport: options.transport, now: () => NOW, diagnostic: options.diagnostic || (() => {}) })(req, res);
   return { ...res, headers };
 }
 const login = { action: 'login', email: user.email, password: 'staging-password' };
@@ -107,7 +111,7 @@ test('account response uses verified identity and descriptive profile metadata',
   const result = await run({ action: 'account', userId: 'other-user' }, { client, headers: { cookie: signedIn() } });
   assert.ok(!tables.includes('myops_profiles'), 'account details must not depend on an unapproved profile table');
   assert.deepEqual(result.data, { email: user.email, profile: { display_name: 'A Person', account_type: 'business' },
-    products: { opsp: 'none', opsfinance: 'none', opsflow: 'none', opswms: 'coming_soon', opshr: 'coming_soon' } });
+    products: { opsp: 'none', opsfinance: 'none', opsflow: 'none', opswms: 'coming_soon', opshr: 'coming_soon' }, lifetime: false });
 });
 test('onboarding saves only descriptive metadata through the verified user and grants no role', async () => {
   let request;
@@ -292,7 +296,7 @@ test('session probe: signed-in users get email and product states, never tokens'
     client: withData({ subscriptions: [personal()] }) });
   assert.equal(result.code, 200);
   assert.deepEqual(result.data, { signedIn: true, email: user.email,
-    products: { opsp: 'active', opsfinance: 'none', opsflow: 'none', opswms: 'coming_soon', opshr: 'coming_soon' } });
+    products: { opsp: 'active', opsfinance: 'none', opsflow: 'none', opswms: 'coming_soon', opshr: 'coming_soon' }, lifetime: false });
   assert.ok(!JSON.stringify(result.data).includes('test-access-token'));
 });
 test('15-minute inactivity is enforced server-side for every protected action', async () => {
@@ -350,9 +354,15 @@ test('launch: client-supplied entitlement claims are ignored', async () => {
 });
 test('launch: active subscription returns only the configured HTTPS destination', async () => {
   const headers = { cookie: signedIn() };
-  const ok = await run({ action: 'launch', product: 'opsp' }, { headers, env: launchEnv, client: withData({ subscriptions: [personal()] }) });
+  const ok = await run({ action: 'launch', product: 'opsp' }, { headers, env: launchEnv,
+    client: withData({ subscriptions: [personal()] }),
+    appAccessFactory: () => ({ issueTicket: async ({ userId, product }) => {
+      assert.equal(userId, user.id);
+      assert.equal(product, 'opsp');
+      return { status: 200, next: 'https://app.example.test/opsp/launch?t=opaque-ticket' };
+    } }) });
   assert.equal(ok.code, 200);
-  assert.deepEqual(ok.data, { next: 'https://app.example.test/opsp' });
+  assert.deepEqual(ok.data, { next: 'https://app.example.test/opsp/launch?t=opaque-ticket' });
   for (const MYOPS_APP_URL_OPSP of [undefined, 'http://app.example.test', 'javascript:alert(1)', '//evil.example']) {
     const result = await run({ action: 'launch', product: 'opsp' }, { headers, env: { MYOPS_APP_URL_OPSP }, client: withData({ subscriptions: [personal()] }) });
     assert.equal(result.code, 503);
@@ -367,6 +377,22 @@ test('launch fails closed when subscription data cannot be read', async () => {
     assert.equal(result.data.next, undefined);
   }
 });
+test('MYOPS logout and detected inactivity revoke all app sessions for the verified user', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({
+    revokeUserSessions: async (userId) => { revoked.push(userId); return true; },
+  });
+  const loggedOut = await run({ action: 'logout' }, {
+    headers: { cookie: signedIn() }, appAccessFactory,
+  });
+  assert.equal(loggedOut.code, 200);
+  assert.deepEqual(revoked, [user.id]);
+  const stale = await run({ action: 'account' }, {
+    headers: { cookie: signedIn(15 * 60 * 1000 + 1) }, appAccessFactory,
+  });
+  assert.equal(stale.code, 401);
+  assert.deepEqual(revoked, [user.id, user.id]);
+});
 test('resolveProductStates: bundles, organisation grants and catalog state', () => {
   const states = (subscriptions, grants = []) => resolveProductStates({ userId: user.id, catalog, subscriptions, grants, now: NOW });
   const bundle = states([personal({ is_complete_bundle: true, product_slug: null })]);
@@ -376,4 +402,260 @@ test('resolveProductStates: bundles, organisation grants and catalog state', () 
   assert.equal(states([org], [{ organization_id: 'org-2', product_slug: 'opsfinance' }]).opsfinance, 'none');
   assert.equal(states([org], [{ organization_id: 'org-1', product_slug: 'opsp' }]).opsp, 'none');
   assert.equal(states([org], [{ organization_id: 'org-1', product_slug: 'opsfinance' }]).opsfinance, 'active');
+});
+
+const identityCookie = (id = user.id, ageMs = 0) => `__Host-myops-identity=${signIdentity(env.MYOPS_SESSION_SECRET, id, NOW - ageMs)}`;
+const expiredToken = mock({
+  getUser: async () => ({ data: { user: null }, error: { message: 'jwt expired' } }),
+  admin: { signOut: async () => ({ error: { message: 'jwt expired' } }) },
+});
+
+test('regression H-1: login stores a server-signed identity that the browser cannot forge', async () => {
+  const result = await run(login);
+  const identity = result.headers['Set-Cookie'].find((cookie) => cookie.startsWith('__Host-myops-identity='));
+  assert.match(identity, /HttpOnly; Secure; SameSite=Lax; Max-Age=43200/);
+  const value = decodeURIComponent(identity.split(';')[0].split('=').slice(1).join('='));
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, value, NOW), user.id);
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, value.replace(user.id, 'other-user'), NOW), null);
+  assert.equal(verifiedIdentity('x'.repeat(40), value, NOW), null);
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, value, NOW + 12 * 3600 * 1000 + 1), null);
+});
+
+test('regression H-1: logout with an expired Supabase token still revokes app access', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => { revoked.push(id); return true; } });
+  const result = await run({ action: 'logout' }, {
+    headers: { cookie: `${signedIn()}; ${identityCookie()}` }, client: expiredToken, appAccessFactory,
+  });
+  assert.equal(result.code, 200);
+  assert.deepEqual(revoked, [user.id]);
+  const noToken = await run({ action: 'logout' }, { headers: { cookie: identityCookie() }, appAccessFactory });
+  assert.equal(noToken.code, 200);
+  assert.deepEqual(revoked, [user.id, user.id]);
+});
+
+test('regression H-1: forged, tampered or stale identity cookies never select a user to revoke', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => { revoked.push(id); return true; } });
+  for (const cookie of ['__Host-myops-identity=victim-user.1.AAAA',
+    `__Host-myops-identity=${signIdentity('y'.repeat(40), 'victim-user', NOW)}`,
+    identityCookie('victim-user', 13 * 3600 * 1000)]) {
+    assert.equal((await run({ action: 'logout' }, { headers: { cookie }, appAccessFactory })).code, 200);
+  }
+  assert.deepEqual(revoked, []);
+});
+
+test('regression H-1: inactivity and an expired token revoke app access even without a usable token', async () => {
+  const revoked = [];
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => { revoked.push(id); return true; } });
+  const idle = await run({ action: 'session' }, {
+    headers: { cookie: `__Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - 16 * 60 * 1000)}; ${identityCookie()}` },
+    appAccessFactory,
+  });
+  assert.equal(idle.code, 200);
+  assert.deepEqual(idle.data, { signedIn: false });
+  assert.deepEqual(revoked, [user.id]);
+  const expired = await run({ action: 'account' }, {
+    headers: { cookie: `${signedIn()}; ${identityCookie()}` }, client: expiredToken, appAccessFactory,
+  });
+  assert.equal(expired.code, 401);
+  assert.deepEqual(revoked, [user.id, user.id]);
+  assert.ok(expired.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-identity=;')));
+});
+
+test('regression H-1: a failed app-access revocation fails closed and still clears cookies', async () => {
+  const appAccessFactory = () => ({ revokeUserSessions: async () => { throw new Error('app_access_unavailable'); } });
+  const result = await run({ action: 'logout' }, { headers: { cookie: `${signedIn()}; ${identityCookie()}` }, appAccessFactory });
+  assert.equal(result.code, 500);
+  assert.ok(result.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-access=;')));
+  const idle = await run({ action: 'account' }, {
+    headers: { cookie: `${signedIn(15 * 60 * 1000 + 1)}; ${identityCookie()}` }, appAccessFactory });
+  assert.equal(idle.code, 401, 'stale cookies do not produce repeated 500s');
+  assert.ok(idle.headers['Set-Cookie'].some((cookie) => cookie.startsWith('__Host-myops-revoke=') && !cookie.includes('Max-Age=0')));
+});
+
+const pendingCookie = (id = user.id, ageMs = 0) => `__Host-myops-revoke=${signPending(env.MYOPS_SESSION_SECRET, id, NOW - ageMs)}`;
+const setCookies = (result) => result.headers['Set-Cookie'] || [];
+const pendingSet = (result) => setCookies(result).find((cookie) => cookie.startsWith('__Host-myops-revoke=') && !cookie.includes('Max-Age=0'));
+const pendingCleared = (result) => setCookies(result).some((cookie) => cookie.startsWith('__Host-myops-revoke=;'));
+function flaky() {
+  const state = { down: true, calls: [] };
+  const appAccessFactory = () => ({ revokeUserSessions: async (id) => {
+    state.calls.push(id);
+    if (state.down) throw new Error('app_access_down');
+    return true;
+  } });
+  return { state, appAccessFactory };
+}
+
+test('M-1: failed logout revocation is never reported as success and queues a signed retry', async () => {
+  const { appAccessFactory } = flaky();
+  const result = await run({ action: 'logout' }, { headers: { cookie: `${signedIn()}; ${identityCookie()}` }, appAccessFactory });
+  assert.equal(result.code, 500);
+  assert.ok(pendingSet(result), 'pending marker set');
+  assert.ok(setCookies(result).some((cookie) => cookie.startsWith('__Host-myops-access=;')));
+  const pending = decodeURIComponent(pendingSet(result).split(';')[0].split('=').slice(1).join('='));
+  assert.equal(verifiedPending(env.MYOPS_SESSION_SECRET, pending, NOW), user.id);
+  assert.equal(verifiedIdentity(env.MYOPS_SESSION_SECRET, pending, NOW), null, 'pending and identity cookies are not interchangeable');
+});
+
+test('M-1: retry succeeds after recovery and the pending marker is cleared; repeated logout is idempotent', async () => {
+  const { state, appAccessFactory } = flaky();
+  const first = await run({ action: 'logout' }, { headers: { cookie: identityCookie() }, appAccessFactory });
+  assert.equal(first.code, 500);
+  const stillDown = await run({ action: 'logout' }, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(stillDown.code, 500);
+  assert.ok(pendingSet(stillDown));
+  state.down = false;
+  const recovered = await run({ action: 'session' }, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(recovered.code, 200);
+  assert.deepEqual(recovered.data, { signedIn: false });
+  assert.ok(pendingCleared(recovered));
+  state.calls.length = 0;
+  for (let i = 0; i < 2; i++) {
+    const again = await run({ action: 'logout' }, { headers: { cookie: identityCookie() }, appAccessFactory });
+    assert.equal(again.code, 200);
+    assert.equal(pendingSet(again), undefined);
+  }
+  assert.ok(state.calls.every((id) => id === user.id));
+});
+
+test('M-1: stale cookies during an outage do not cause repeated 500s and stay queued', async () => {
+  const { appAccessFactory } = flaky();
+  for (const action of ['session', 'account']) {
+    const result = await run({ action }, {
+      headers: { cookie: `__Host-myops-activity=${signActivity(env.MYOPS_SESSION_SECRET, NOW - 20 * 60 * 1000)}; ${signedIn(0).split('; ')[0]}; ${identityCookie()}` }, appAccessFactory });
+    assert.equal(result.code, action === 'session' ? 200 : 401);
+    assert.ok(pendingSet(result));
+  }
+});
+
+test('M-1: pending retry runs on any request and blocks sign-in until it succeeds (fail closed)', async () => {
+  const { state, appAccessFactory } = flaky();
+  const blocked = await run(login, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(blocked.code, 503);
+  assert.equal(setCookies(blocked).some((cookie) => cookie.startsWith('__Host-myops-access=') && !cookie.includes('Max-Age=0')), false);
+  state.down = false;
+  const ok = await run(login, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(ok.code, 200);
+  assert.ok(pendingCleared(ok));
+  assert.ok(state.calls.includes(user.id));
+});
+
+test('M-1: forged, wrong-secret, stale or identity-cookie pending markers are ignored and discarded', async () => {
+  const { state, appAccessFactory } = flaky();
+  state.down = false;
+  for (const cookie of ['__Host-myops-revoke=victim.1.AAAA',
+    `__Host-myops-revoke=${signPending('z'.repeat(40), 'victim', NOW)}`,
+    pendingCookie('victim', 25 * 3600 * 1000),
+    `__Host-myops-revoke=${signIdentity(env.MYOPS_SESSION_SECRET, 'victim', NOW)}`]) {
+    const result = await run({ action: 'session' }, { headers: { cookie }, appAccessFactory });
+    assert.equal(result.code, 200);
+    assert.ok(pendingCleared(result));
+  }
+  assert.deepEqual(state.calls, []);
+});
+
+// ---- Durable login-session binding ----
+const loginCalls = () => {
+  const state = { started: [], touched: [], revoked: [], issued: [], live: true, startId: LOGIN_ID };
+  const appAccessFactory = () => ({
+    startLogin: async (id) => { state.started.push(id); return state.startId; },
+    touchLogin: async (id, loginId) => { state.touched.push([id, loginId]); return state.live; },
+    revokeUserSessions: async (id, options) => { state.revoked.push([id, options]); return true; },
+    issueTicket: async (args) => { state.issued.push(args); return { status: 200, next: 'https://app.example.test/opsp/launch#t=opaque' }; },
+  });
+  return { state, appAccessFactory };
+};
+const loginSet = (result) => setCookies(result).find((cookie) => cookie.startsWith('__Host-myops-login=') && !cookie.includes('Max-Age=0'));
+const launchRows = () => withData({ subscriptions: [personal()] });
+
+test('login binding: sign-in creates a server-side login record and a signed, user-bound cookie', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  const result = await run(login, { appAccessFactory });
+  assert.equal(result.code, 200);
+  assert.deepEqual(state.started, [user.id]);
+  const value = decodeURIComponent(loginSet(result).split(';')[0].split('=').slice(1).join('='));
+  assert.deepEqual(verifiedLogin(env.MYOPS_SESSION_SECRET, value, NOW), { userId: user.id, loginSessionId: LOGIN_ID });
+  assert.match(loginSet(result), /HttpOnly; Secure; SameSite=Lax/);
+  assert.equal(verifiedLogin(env.MYOPS_SESSION_SECRET, value.replace(user.id, 'other-user'), NOW), null, 'cannot retarget the cookie');
+  assert.equal(verifiedLogin('x'.repeat(40), value, NOW), null, 'wrong secret');
+  assert.equal(verifiedLogin(env.MYOPS_SESSION_SECRET, value, NOW + 13 * 3600 * 1000), null, 'expired');
+});
+
+test('login binding: if the login record cannot be created, sign-in works but launch fails closed', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  state.startId = null;
+  const result = await run(login, { appAccessFactory });
+  assert.equal(result.code, 200);
+  assert.equal(loginSet(result), undefined);
+  const launch = await run({ action: 'launch', product: 'opsp' }, { headers: { cookie: signedIn().replace(/; __Host-myops-login=.*/, '') },
+    env: launchEnv, client: launchRows(), appAccessFactory });
+  assert.equal(launch.code, 401);
+  assert.equal(state.issued.length, 0);
+});
+
+test('login binding: launch needs a verified login cookie that belongs to the verified user', async () => {
+  for (const extra of [loginCookie('someone-else'), '__Host-myops-login=forged.value', `__Host-myops-login=${signLogin('y'.repeat(40), user.id, LOGIN_ID, NOW)}`]) {
+    const { state, appAccessFactory } = loginCalls();
+    const base = signedIn().replace(/; __Host-myops-login=.*/, '');
+    const result = await run({ action: 'launch', product: 'opsp' }, { headers: { cookie: `${base}; ${extra}` }, env: launchEnv, client: launchRows(), appAccessFactory });
+    assert.equal(result.code, 401, extra);
+    assert.equal(state.issued.length, 0);
+  }
+  const { state, appAccessFactory } = loginCalls();
+  const ok = await run({ action: 'launch', product: 'opsp', loginSessionId: 'attacker-supplied' }, { headers: { cookie: signedIn() }, env: launchEnv, client: launchRows(), appAccessFactory });
+  assert.equal(ok.code, 200);
+  assert.deepEqual(state.issued, [{ userId: user.id, product: 'opsp', loginSessionId: LOGIN_ID }], 'browser-supplied ids are ignored');
+});
+
+test('login binding: user activity is recorded server-side, passive probes are not, and a dead login ends the session', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  await run({ action: 'session' }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.deepEqual(state.touched, [[user.id, LOGIN_ID]]);
+  await run({ action: 'session', activity: false }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.equal(state.touched.length, 1, 'passive polling is not MYOPS user activity');
+
+  state.live = false;
+  const ended = await run({ action: 'account' }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.equal(ended.code, 401);
+  assert.equal(ended.data.reason, 'inactive');
+  assert.ok(setCookies(ended).some((cookie) => cookie.startsWith('__Host-myops-access=') && cookie.includes('Max-Age=0')));
+  assert.ok(setCookies(ended).some((cookie) => cookie.startsWith('__Host-myops-login=') && cookie.includes('Max-Age=0')));
+  assert.deepEqual(state.revoked.at(-1), [user.id, { loginSessionId: LOGIN_ID, reason: 'inactivity' }]);
+
+  const unknown = loginCalls();
+  unknown.appAccessFactory = () => ({ touchLogin: async () => null, revokeUserSessions: async () => true });
+  const stillIn = await run({ action: 'session' }, { headers: { cookie: signedIn() }, appAccessFactory: unknown.appAccessFactory });
+  assert.equal(stillIn.data.signedIn, true, 'a transient lookup failure does not log the user out');
+});
+
+test('login binding: logout revokes only this login session; password reset revokes all; repeats are safe', async () => {
+  const { state, appAccessFactory } = loginCalls();
+  for (let i = 0; i < 2; i += 1) {
+    const out = await run({ action: 'logout' }, { headers: { cookie: signedIn() }, appAccessFactory });
+    assert.equal(out.code, 200);
+  }
+  assert.deepEqual(state.revoked, [[user.id, { loginSessionId: LOGIN_ID, reason: 'logout' }], [user.id, { loginSessionId: LOGIN_ID, reason: 'logout' }]]);
+  state.revoked.length = 0;
+  const reset = await run({ action: 'reset', password: 'a-new-long-password' }, { headers: { cookie: signedIn() }, appAccessFactory,
+    transport: async () => ({ ok: true, json: async () => ({}) }) });
+  assert.equal(reset.code, 200);
+  assert.deepEqual(state.revoked, [[user.id, { reason: 'password_reset' }]], 'user-wide, no login id');
+});
+
+test('login binding: a failed per-login revocation queues a user-wide retry and never reports success', async () => {
+  const state = { down: true, calls: [] };
+  const appAccessFactory = () => ({ revokeUserSessions: async (id, options) => {
+    state.calls.push([id, options]);
+    if (state.down) throw new Error('app_access_unavailable');
+    return true;
+  } });
+  const failed = await run({ action: 'logout' }, { headers: { cookie: signedIn() }, appAccessFactory });
+  assert.equal(failed.code, 500);
+  assert.ok(pendingSet(failed));
+  state.down = false;
+  const retry = await run({ action: 'session' }, { headers: { cookie: pendingCookie() }, appAccessFactory });
+  assert.equal(retry.code, 200);
+  assert.deepEqual(state.calls.at(-1), [user.id, { reason: 'logout' }], 'retry is user-wide without a login id');
 });

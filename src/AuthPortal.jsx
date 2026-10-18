@@ -1,24 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
-
-async function request(action, fields = {}) {
-  let response;
-  try {
-    response = await fetch('/api/auth', {
-      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...fields }),
-    });
-  } catch { throw new Error('Unable to connect. Check your connection and try again.'); }
-  let result;
-  try { result = await response.json(); }
-  catch { throw new Error('Authentication service returned an unexpected response. Reload this Preview and try again.'); }
-  if (!response.ok) {
-    const error = new Error(result.error || 'Request failed.');
-    error.status = response.status;
-    throw error;
-  }
-  return result;
-}
+import { authRequest as request } from './authRequest';
 
 const productLabels = { opsp: 'OpsPS', opsfinance: 'OpsFinance', opsflow: 'OpsFlow', opswms: 'OpsWMS', opshr: 'OpsHR' };
 
@@ -92,12 +74,13 @@ export function AuthPortal({ mode }) {
                 {Object.entries(productLabels).map(([slug, label]) => (
                   <li id={`subscription-${slug}`} key={slug}>
                     {label}: {({ active: 'Active subscription', none: 'No subscription', coming_soon: 'Coming soon' })[account.products[slug]]}
-                    {account.products[slug] === 'none' && <> — <button type="button" className="btn btn-secondary" disabled>Checkout not enabled in Preview</button></>}
+                    {account.products[slug] === 'none' && <> — <a className="btn btn-secondary" href="/#founders">View Founders 100 and All Apps offer</a></>}
                   </li>
                 ))}
               </ul>
             ) : <p>Subscription status is currently unavailable.</p>}
-            <p>Payments are not active. Application access is granted only after the server confirms an active subscription.</p>
+            {account.lifetime && <p>Founders 100 lifetime access: active (all current and future MYOPS apps).</p>}
+            <p>Preview payments use the ToyyibPay sandbox only. Application access is granted only after the server confirms a verified payment or active subscription.</p>
           </section>
           <p>Cross-app SSO is not enabled. This site signs you out after 15 minutes of inactivity.</p>
           <button type="button" className="btn btn-primary" disabled={busy} onClick={logout}>Sign out</button>

@@ -1,15 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { transformWithEsbuild } from 'vite';
-import { readFile } from 'node:fs/promises';
+import { importSrc } from './helpers/load-src.mjs';
 import { JSDOM } from 'jsdom';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 
-const source = await readFile(new URL('../src/session.jsx', import.meta.url), 'utf8');
-const { code } = await transformWithEsbuild(source, 'session.jsx', { jsx: 'automatic' });
-const resolved = code.replace(/from "(react(?:\/jsx-runtime)?|prop-types)"/g, (_, name) => `from "${import.meta.resolve(name)}"`);
-const { SessionProvider, AuthNav, ProductAction, useSession } = await import(`data:text/javascript;base64,${Buffer.from(resolved).toString('base64')}`);
+const { SessionProvider, AuthNav, ProductAction, useSession } = await importSrc('session.jsx');
 
 const products = [{ slug: 'opsp' }, { slug: 'opsfinance' }, { slug: 'opsflow' }, { slug: 'opswms', comingSoon: true }];
 const signedOut = { signedIn: false };
@@ -78,7 +74,7 @@ test('product cards reflect Active, No subscription and Coming Soon states from 
   try {
     assert.equal(text('#opsp .product-action button'), 'Open App');
     assert.equal(text('#opsfinance .product-action'), 'Subscribe');
-    assert.equal(document.querySelector('#opsfinance a').getAttribute('href'), '/account#subscription-opsfinance');
+    assert.equal(document.querySelector('#opsfinance a').getAttribute('href'), '/#founders');
     assert.equal(text('#opsflow .coming-soon-label'), 'Coming Soon');
     assert.equal(document.querySelector('#opsflow button'), null);
   } finally { await cleanup(); }
