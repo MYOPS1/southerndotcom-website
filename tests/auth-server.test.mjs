@@ -305,11 +305,13 @@ test('15-minute inactivity is enforced server-side for every protected action', 
     const result = await run({ action, product: 'opsp' }, { headers: stale, client: withData({ subscriptions: [personal()] }) });
     assert.equal(result.code, 401, action);
     assert.equal(result.data.reason, 'inactive');
-    assert.ok(result.headers['Set-Cookie'].every((c) => c.includes('Max-Age=0')));
+    assert.ok(result.headers['Set-Cookie'].some((c) => c.startsWith('__Host-myops-access=;')));
+    assert.ok(setCookies(result).some((c) => c.startsWith('__Host-myops-revoke=') && !c.includes('Max-Age=0')));
   }
   const probe = await run({ action: 'session' }, { headers: stale });
   assert.deepEqual(probe.data, { signedIn: false });
-  assert.ok(probe.headers['Set-Cookie'].every((c) => c.includes('Max-Age=0')));
+  assert.ok(probe.headers['Set-Cookie'].some((c) => c.startsWith('__Host-myops-access=;')));
+  assert.ok(pendingSet(probe));
 });
 test('activity just inside the window is accepted and refreshed; passive probes do not refresh', async () => {
   const recent = { cookie: signedIn(14 * 60 * 1000) };

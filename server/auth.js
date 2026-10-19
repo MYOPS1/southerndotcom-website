@@ -217,28 +217,59 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const appAccess = appAccessFactory({ env, adminFactory: clientFactory, now, project: PROJECT });
       // Revocation targets only identities proven by the server (signed cookie or verified token).
       // Revokes app access for every verified id plus any unresolved pending id. A failure is never
-      // reported as success: it leaves a signed pending marker so later requests retry it.
+      // reported as success: it leaves a signed pending marker and a durable server-side queue so later
+      // requests can retry even after cookie loss or a restart.
       // A verified login cookie narrows revocation to this browser's login session; password reset and
       // retries of an earlier failure are user-wide (a superset, never weaker).
       const settleRevocation = async (reason, ...ids) => {
-        const login = verifiedLogin(secret, saved[LOGIN], now());
+        const currentLogin = verifiedLogin(secret, saved[LOGIN], now());
         const pending = verifiedPending(secret, saved[PENDING], now());
         const jobs = new Map();
-        for (const id of [...ids, login?.userId].filter(Boolean)) {
-          jobs.set(id, login && login.userId === id && reason !== 'password_reset'
-            ? { loginSessionId: login.loginSessionId, reason } : { reason });
+        for (const id of [...ids, currentLogin?.userId].filter(Boolean)) {
+          jobs.set(id, currentLogin && currentLogin.userId === id && reason !== 'password_reset'
+            ? { loginSessionId: currentLogin.loginSessionId, reason } : { reason });
         }
         if (pending) jobs.set(pending, { reason: jobs.get(pending)?.reason ?? 'logout' });
-        const targets = [...jobs.keys()];
+        const targets = [...jobs.keys()].filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id));
         const results = await Promise.allSettled(targets.map((id) => appAccess.revokeUserSessions(id, jobs.get(id))));
-        const failed = targets.filter((id, index) => results[index].status === 'rejected');
-        if (failed.length) setCookie(PENDING, signPending(secret, failed[0], now()), PENDING_MAX_MS / 1000);
-        else if (saved[PENDING]) setCookie(PENDING, '', 0);
+        const failed = [];
+        for (const [index, id] of targets.entries()) {
+          const result = results[index];
+          const noOpSuccess = appAccessFactory === createAppAccess && ['logout', 'password_reset'].includes(reason)
+            && result.status === 'fulfilled' && result.value === false;
+          const okay = noOpSuccess || (result.status === 'fulfilled' && (result.value === true || result.value === 't'
+            || (typeof result.value === 'number' && Number.isInteger(result.value) && result.value >= 0)));
+          if (result.status === 'rejected' || (!okay || result.value === false || result.value === null || result.value === undefined) && !noOpSuccess) {
+            failed.push(id);
+          }
+        }
+        if (failed.length) {
+          for (const id of failed) {
+            const job = jobs.get(id) || { reason: 'logout' };
+            if (typeof appAccess.queueRevocation === 'function') {
+              await appAccess.queueRevocation(id, {
+                loginSessionId: job.loginSessionId ?? null,
+                reason: job.reason ?? 'logout',
+              });
+            }
+          }
+          setCookie(PENDING, signPending(secret, failed[0], now()), PENDING_MAX_MS / 1000);
+        } else if (saved[PENDING]) {
+          setCookie(PENDING, '', 0);
+        }
         return failed.length === 0;
       };
+      const identityUser = cookieIdentity();
+      const sessionLogin = verifiedLogin(secret, saved[LOGIN], now());
+      const durablePending = identityUser && typeof appAccess.pendingRevocations === 'function'
+        ? await appAccess.pendingRevocations(identityUser, sessionLogin?.loginSessionId ?? null)
+        : null;
+      if (durablePending === null && identityUser && typeof appAccess.pendingRevocations === 'function') {
+        return reply(503, { error: 'Session validation is temporarily unavailable. Try again shortly.' });
+      }
       // Retry an earlier failed revocation on every request, before anything else can start a session.
-      const pendingUser = verifiedPending(secret, saved[PENDING], now());
-      const pendingCleared = pendingUser ? await settleRevocation('logout') : true;
+      const pendingUser = verifiedPending(secret, saved[PENDING], now()) || (durablePending?.length ? identityUser : null);
+      const pendingCleared = pendingUser ? await settleRevocation('logout', pendingUser) : true;
       if (saved[PENDING] && !pendingUser) setCookie(PENDING, '', 0);
       if (!pendingCleared && ['login', 'callback'].includes(action)) {
         return reply(503, { error: 'Sign-in is temporarily unavailable. Try again shortly.' });

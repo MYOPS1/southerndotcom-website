@@ -208,6 +208,39 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
   }
 
   const REASONS = new Set(['logout', 'password_reset', 'inactivity', 'absolute', 'admin']);
+  function revocationSucceeded(value) {
+    return value === true || value === 't' || value === 1 || (typeof value === 'number' && Number.isInteger(value) && value >= 0);
+  }
+  async function queueRevocation(userId, { loginSessionId, reason = 'logout' } = {}) {
+    if (!configured(env) || !USER_ID.test(String(userId))) return false;
+    const admin = client();
+    if (!admin) return false;
+    const why = REASONS.has(reason) ? reason : 'admin';
+    try {
+      const result = await rpc(admin, 'myops_enqueue_revocation', {
+        p_user_id: userId,
+        p_login_session_id: loginSessionId && USER_ID.test(String(loginSessionId)) ? loginSessionId : null,
+        p_reason: why,
+      });
+      return revocationSucceeded(result);
+    } catch {
+      return false;
+    }
+  }
+  async function pendingRevocations(userId, loginSessionId = null) {
+    if (!configured(env) || !USER_ID.test(String(userId))) return [];
+    const admin = client();
+    if (!admin) return null;
+    try {
+      let query = admin.from('myops_revocation_requests').select('id, user_id, login_session_id, reason').eq('user_id', userId).is('completed_at', null);
+      if (loginSessionId && USER_ID.test(String(loginSessionId))) query = query.eq('login_session_id', loginSessionId);
+      const { data, error } = await query;
+      if (error) return null;
+      return Array.isArray(data) ? data : [];
+    } catch {
+      return null;
+    }
+  }
   async function revokeUserSessions(userId, { loginSessionId, reason = 'logout' } = {}) {
     // Endpoints are disabled when unconfigured, so no app session can be granted. When configured,
     // a failure to revoke must surface to the caller (fail closed).
@@ -216,11 +249,13 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     const admin = client();
     if (!admin) throw new Error('app_access_unavailable');
     const why = REASONS.has(reason) ? reason : 'admin';
+    let result;
     if (loginSessionId && USER_ID.test(String(loginSessionId))) {
-      await rpc(admin, 'myops_login_end', { p_id: loginSessionId, p_user_id: userId, p_reason: why });
+      result = await rpc(admin, 'myops_login_end', { p_id: loginSessionId, p_user_id: userId, p_reason: why });
     } else {
-      await rpc(admin, 'myops_login_end_all', { p_user_id: userId, p_reason: why });
+      result = await rpc(admin, 'myops_login_end_all', { p_user_id: userId, p_reason: why });
     }
+    if (!revocationSucceeded(result)) throw new Error('app_access_revocation_failed');
     return true;
   }
 
@@ -331,5 +366,5 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     }
   }
 
-  return { issueTicket, startLogin, touchLogin, revokeUserSessions, redeem, entitlement };
+  return { issueTicket, startLogin, touchLogin, queueRevocation, pendingRevocations, revokeUserSessions, redeem, entitlement };
 }
