@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthHandler, signActivity, signIdentity, signLogin, verifiedLogin, verifiedIdentity, signPending, verifiedPending, resolveProductStates } from '../server/auth.js';
+import { createAuthHandler, enforceWorkerRateLimit, signActivity, signIdentity, signLogin, verifiedLogin, verifiedIdentity, signPending, verifiedPending, resolveProductStates } from '../server/auth.js';
 import { createClient } from '@supabase/supabase-js';
 
 const origin = 'https://trusted-preview.vercel.app';
@@ -709,6 +709,98 @@ test('worker: valid authorization executes and returns safe aggregate metrics', 
     queued: 1,
     status: 'ok',
   });
+});
+
+test('worker: execution timeout fails closed without false success', async () => {
+  const result = await runWorker({
+    env: { MYOPS_REVOCATION_TIMEOUT_MS: '5' },
+    headers: { 'x-myops-cron-secret': workerSecret },
+    processRevocations: async ({ signal }) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve({
+        processed: 1, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'ok',
+      }), 100);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new Error('timeout'));
+      }, { once: true });
+    }),
+  });
+  assert.equal(result.code, 504);
+  assert.equal(result.data.error, 'Revocation worker timed out.');
+});
+
+test('worker: aborted database operation is reported as a timeout, not a success', async () => {
+  const result = await runWorker({
+    env: { MYOPS_REVOCATION_TIMEOUT_MS: '25' },
+    headers: { 'x-myops-cron-secret': workerSecret },
+    processRevocations: async ({ signal }) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve({
+        processed: 1, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'ok',
+      }), 200);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new Error('timeout'));
+      }, { once: true });
+    }),
+  });
+  assert.equal(result.code, 504);
+  assert.equal(result.data.error, 'Revocation worker timed out.');
+});
+
+test('worker: repeated authenticated requests are rate limited before queue work', async () => {
+  const ip = '198.51.100.77';
+  let calls = 0;
+  const processRevocations = async () => {
+    calls += 1;
+    return { processed: 1, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'ok' };
+  };
+  const first = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret, 'x-forwarded-for': ip },
+    env: { MYOPS_WORKER_RATE_LIMIT_MAX: '2', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '60000' },
+    processRevocations,
+  });
+  const second = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret, 'x-forwarded-for': ip },
+    env: { MYOPS_WORKER_RATE_LIMIT_MAX: '2', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '60000' },
+    processRevocations,
+  });
+  const third = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret, 'x-forwarded-for': ip },
+    env: { MYOPS_WORKER_RATE_LIMIT_MAX: '2', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '60000' },
+    processRevocations,
+  });
+  assert.equal(first.code, 200);
+  assert.equal(second.code, 200);
+  assert.equal(third.code, 429);
+  assert.equal(third.data.retry_after_seconds > 0, true);
+  assert.equal(calls, 2, 'blocked requests must not reach queue processing');
+});
+
+test('worker: invalid-secret flood is rate limited before database access', async () => {
+  const ip = '198.51.100.78';
+  let calls = 0;
+  const processRevocations = async () => {
+    calls += 1;
+    return { processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'ok' };
+  };
+  const first = await runWorker({ headers: { 'x-myops-cron-secret': 'bad-secret', 'x-forwarded-for': ip }, processRevocations, env: { MYOPS_WORKER_RATE_LIMIT_MAX: '2', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '60000' } });
+  const second = await runWorker({ headers: { 'x-myops-cron-secret': 'bad-secret', 'x-forwarded-for': ip }, processRevocations, env: { MYOPS_WORKER_RATE_LIMIT_MAX: '2', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '60000' } });
+  const third = await runWorker({ headers: { 'x-myops-cron-secret': 'bad-secret', 'x-forwarded-for': ip }, processRevocations, env: { MYOPS_WORKER_RATE_LIMIT_MAX: '2', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '60000' } });
+  assert.equal(first.code, 401);
+  assert.equal(second.code, 401);
+  assert.equal(third.code, 429);
+  assert.equal(calls, 0, 'invalid auth floods must not reach the queue');
+});
+
+test('worker: rate limit resets when the window expires', () => {
+  const start = Date.now();
+  const first = enforceWorkerRateLimit({ env: { MYOPS_WORKER_RATE_LIMIT_MAX: '1', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '1000' }, headers: { 'x-forwarded-for': '198.51.100.88' }, now: () => start });
+  const second = enforceWorkerRateLimit({ env: { MYOPS_WORKER_RATE_LIMIT_MAX: '1', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '1000' }, headers: { 'x-forwarded-for': '198.51.100.88' }, now: () => start + 500 });
+  const third = enforceWorkerRateLimit({ env: { MYOPS_WORKER_RATE_LIMIT_MAX: '1', MYOPS_WORKER_RATE_LIMIT_WINDOW_MS: '1000' }, headers: { 'x-forwarded-for': '198.51.100.88' }, now: () => start + 1500 });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, false);
+  assert.equal(third.ok, true);
+  assert.equal(third.retryAfter, 0);
 });
 
 test('worker: database unavailable fails closed', async () => {

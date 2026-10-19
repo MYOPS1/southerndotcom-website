@@ -97,12 +97,39 @@ export function verifiedPending(secret, cookie, now) {
   return age >= 0 && age <= PENDING_MAX_MS ? userId : null;
 }
 
+const WORKER_TIMEOUT_MS = Number(process.env.MYOPS_REVOCATION_TIMEOUT_MS || 15000);
+const WORKER_RATE_LIMIT_WINDOW_MS = Number(process.env.MYOPS_WORKER_RATE_LIMIT_WINDOW_MS || 60000);
+const WORKER_RATE_LIMIT_MAX = Number(process.env.MYOPS_WORKER_RATE_LIMIT_MAX || 20);
+const WORKER_RATE_LIMIT_STORE = globalThis.__myops_worker_rate_limit || (globalThis.__myops_worker_rate_limit = new Map());
+
 export function verifyWorkerSecret(secret, token) {
   if (typeof secret !== 'string' || secret.length === 0 || typeof token !== 'string' || token.length === 0) return false;
   const expected = Buffer.from(secret);
   const actual = Buffer.from(token);
   if (expected.length !== actual.length) return false;
   return timingSafeEqual(expected, actual);
+}
+
+export function enforceWorkerRateLimit({ env = {}, headers = {}, now = Date.now, key = 'worker' } = {}) {
+  const windowMs = Number(env.MYOPS_WORKER_RATE_LIMIT_WINDOW_MS || WORKER_RATE_LIMIT_WINDOW_MS);
+  const maxRequests = Number(env.MYOPS_WORKER_RATE_LIMIT_MAX || WORKER_RATE_LIMIT_MAX);
+  const source = typeof headers['x-forwarded-for'] === 'string' && headers['x-forwarded-for']
+    ? headers['x-forwarded-for'].split(',')[0].trim()
+    : (typeof headers['x-real-ip'] === 'string' ? headers['x-real-ip'] : 'unknown');
+  const limiterKey = `${key}:${source}`;
+  const bucket = WORKER_RATE_LIMIT_STORE.get(limiterKey) || { count: 0, resetAt: now() + Math.max(windowMs, 1000) };
+  const timestamp = now();
+  if (timestamp >= bucket.resetAt) {
+    bucket.count = 0;
+    bucket.resetAt = timestamp + Math.max(windowMs, 1000);
+  }
+  if (bucket.count >= Math.max(maxRequests, 1)) {
+    const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - timestamp) / 1000));
+    return { ok: false, retryAfter, limit: Math.max(maxRequests, 1), key: limiterKey, windowMs: Math.max(windowMs, 1000) };
+  }
+  bucket.count += 1;
+  WORKER_RATE_LIMIT_STORE.set(limiterKey, bucket);
+  return { ok: true, retryAfter: 0, limit: Math.max(maxRequests, 1), key: limiterKey, windowMs: Math.max(windowMs, 1000) };
 }
 
 export function parseWorkerAuthorization(env, headers = {}) {
@@ -119,17 +146,28 @@ export function parseWorkerAuthorization(env, headers = {}) {
   return { ok: true, token: provided };
 }
 
-export async function runRevocationWorker({ env, headers = {}, body = {}, appAccess, reply }) {
+export async function runRevocationWorker({ env, headers = {}, body = {}, appAccess, reply, now = Date.now }) {
   if (!appAccess || typeof appAccess.processRevocations !== 'function') {
     return reply(503, { error: 'Revocation worker is unavailable.' });
+  }
+  const rateLimit = enforceWorkerRateLimit({ env, headers, now, key: 'worker' });
+  if (!rateLimit.ok) {
+    return reply(429, { error: 'Too many worker requests. Try again later.', retry_after_seconds: rateLimit.retryAfter });
   }
   const auth = parseWorkerAuthorization(env, headers);
   if (!auth.ok) {
     return reply(401, { error: 'Authentication required.' });
   }
   const batch = Number.isInteger(body?.batch) ? Math.min(Math.max(body.batch, 1), 1000) : 200;
+  const timeoutMs = Number(env.MYOPS_REVOCATION_TIMEOUT_MS || WORKER_TIMEOUT_MS);
+  const boundedMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, 60000) : WORKER_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), boundedMs);
   try {
-    const metrics = await appAccess.processRevocations({ batch });
+    const metrics = await appAccess.processRevocations({ batch, signal: controller.signal });
+    if (controller.signal.aborted) {
+      return reply(504, { error: 'Revocation worker timed out.' });
+    }
     if (!metrics || typeof metrics !== 'object') {
       return reply(503, { error: 'Revocation worker is unavailable.' });
     }
@@ -150,8 +188,13 @@ export async function runRevocationWorker({ env, headers = {}, body = {}, appAcc
       status: typeof metrics.status === 'string' && metrics.status.length ? metrics.status : 'ok',
     };
     return reply(200, payload);
-  } catch {
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === 'AbortError' || String(error?.message || '').includes('timeout')) {
+      return reply(504, { error: 'Revocation worker timed out.' });
+    }
     return reply(503, { error: 'Revocation worker is unavailable.' });
+  } finally {
+    clearTimeout(timer);
   }
 }
 

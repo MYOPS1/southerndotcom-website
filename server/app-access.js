@@ -48,8 +48,10 @@ function serviceClient(env, adminFactory, project) {
   return adminFactory(project, key, { auth: { persistSession: false, autoRefreshToken: false } });
 }
 
-async function rpc(client, name, args) {
+async function rpc(client, name, args, signal) {
+  if (signal && signal.aborted) throw new Error('app_access_timeout');
   const { data, error } = await client.rpc(name, args);
+  if (signal && signal.aborted) throw new Error('app_access_timeout');
   if (error) throw new Error(`app_access_${name}`);
   return data;
 }
@@ -211,6 +213,34 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
   function revocationSucceeded(value) {
     return value === true || value === 't' || value === 1 || (typeof value === 'number' && Number.isInteger(value) && value >= 0);
   }
+  async function processRevocations({ batch = 200, signal } = {}) {
+    if (signal && signal.aborted) throw new Error('app_access_timeout');
+    if (!configured(env)) return { processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'unconfigured' };
+    const admin = client();
+    if (!admin) return { processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'unavailable' };
+    try {
+      const result = await rpc(admin, 'myops_sweep_logins', { p_batch: Number.isInteger(batch) ? Math.min(Math.max(batch, 1), 1000) : 200 }, signal);
+      if (signal && signal.aborted) throw new Error('app_access_timeout');
+      if (!result || typeof result !== 'object') {
+        return { processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'invalid' };
+      }
+      const safe = {
+        processed: Number.isFinite(Number(result.retried)) ? Number(result.retried) : 0,
+        retried: Number.isFinite(Number(result.retried)) ? Number(result.retried) : 0,
+        retry_failed: Number.isFinite(Number(result.retry_failed)) ? Number(result.retry_failed) : 0,
+        expired_logins: Number.isFinite(Number(result.expired_logins)) ? Number(result.expired_logins) : 0,
+        revoked_app_sessions: Number.isFinite(Number(result.revoked_app_sessions)) ? Number(result.revoked_app_sessions) : 0,
+        revoked_tickets: Number.isFinite(Number(result.revoked_tickets)) ? Number(result.revoked_tickets) : 0,
+        deleted_logins: Number.isFinite(Number(result.deleted_logins)) ? Number(result.deleted_logins) : 0,
+        queued: Number.isFinite(Number(result.queued)) ? Number(result.queued) : 0,
+        status: 'ok',
+      };
+      return safe;
+    } catch (error) {
+      if (signal && signal.aborted) throw new Error('app_access_timeout');
+      return { processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'unavailable' };
+    }
+  }
   async function queueRevocation(userId, { loginSessionId, reason = 'logout' } = {}) {
     if (!configured(env) || !USER_ID.test(String(userId))) return false;
     const admin = client();
@@ -366,5 +396,5 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
     }
   }
 
-  return { issueTicket, startLogin, touchLogin, queueRevocation, pendingRevocations, revokeUserSessions, redeem, entitlement };
+  return { issueTicket, startLogin, touchLogin, processRevocations, queueRevocation, pendingRevocations, revokeUserSessions, redeem, entitlement };
 }
