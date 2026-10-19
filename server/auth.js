@@ -97,6 +97,64 @@ export function verifiedPending(secret, cookie, now) {
   return age >= 0 && age <= PENDING_MAX_MS ? userId : null;
 }
 
+export function verifyWorkerSecret(secret, token) {
+  if (typeof secret !== 'string' || secret.length === 0 || typeof token !== 'string' || token.length === 0) return false;
+  const expected = Buffer.from(secret);
+  const actual = Buffer.from(token);
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
+}
+
+export function parseWorkerAuthorization(env, headers = {}) {
+  const secret = env.MYOPS_CRON_SECRET;
+  const provided = typeof headers['x-myops-cron-secret'] === 'string'
+    ? headers['x-myops-cron-secret']
+    : (typeof headers.authorization === 'string' && /^Bearer\s+/i.test(headers.authorization)
+      ? headers.authorization.replace(/^Bearer\s+/i, '').trim()
+      : '');
+  if (typeof secret !== 'string' || secret.length < 16 || typeof provided !== 'string' || provided.length === 0) {
+    return { ok: false, reason: 'missing' };
+  }
+  if (!verifyWorkerSecret(secret, provided)) return { ok: false, reason: 'invalid' };
+  return { ok: true, token: provided };
+}
+
+export async function runRevocationWorker({ env, headers = {}, body = {}, appAccess, reply }) {
+  if (!appAccess || typeof appAccess.processRevocations !== 'function') {
+    return reply(503, { error: 'Revocation worker is unavailable.' });
+  }
+  const auth = parseWorkerAuthorization(env, headers);
+  if (!auth.ok) {
+    return reply(401, { error: 'Authentication required.' });
+  }
+  const batch = Number.isInteger(body?.batch) ? Math.min(Math.max(body.batch, 1), 1000) : 200;
+  try {
+    const metrics = await appAccess.processRevocations({ batch });
+    if (!metrics || typeof metrics !== 'object') {
+      return reply(503, { error: 'Revocation worker is unavailable.' });
+    }
+    const safeNumber = (value, fallback = 0) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const payload = {
+      ok: true,
+      processed: safeNumber(metrics.processed ?? metrics.retried, 0),
+      retried: safeNumber(metrics.retried, 0),
+      retry_failed: safeNumber(metrics.retry_failed, 0),
+      expired_logins: safeNumber(metrics.expired_logins, 0),
+      revoked_app_sessions: safeNumber(metrics.revoked_app_sessions, 0),
+      revoked_tickets: safeNumber(metrics.revoked_tickets, 0),
+      deleted_logins: safeNumber(metrics.deleted_logins, 0),
+      queued: safeNumber(metrics.queued, 0),
+      status: typeof metrics.status === 'string' && metrics.status.length ? metrics.status : 'ok',
+    };
+    return reply(200, payload);
+  } catch {
+    return reply(503, { error: 'Revocation worker is unavailable.' });
+  }
+}
+
 export { PRODUCT_SLUGS, hasLifetime, resolveProductStates };
 const SLUG = /^[a-z0-9_]{1,32}$/;
 
@@ -349,6 +407,9 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
           && (signOut[0].status === 'rejected' || signOut[0].value?.error);
         if (signOutFailed || !revoked) throw new Error('logout_failed');
         return reply(200, { next: '/' });
+      }
+      if (action === 'revocation-worker') {
+        return runRevocationWorker({ env, headers: req.headers, body, appAccess, reply });
       }
       if (action === 'founders') return reply(200, await payments.founders());
       if (!['account', 'reset', 'profile', 'session', 'launch', 'checkout', 'admin_audit'].includes(action)) return reply(400, { error: 'Unknown operation.' });

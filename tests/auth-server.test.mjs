@@ -661,3 +661,112 @@ test('login binding: a failed per-login revocation queues a user-wide retry and 
   assert.equal(retry.code, 200);
   assert.deepEqual(state.calls.at(-1), [user.id, { reason: 'logout' }], 'retry is user-wide without a login id');
 });
+
+const workerSecret = 'myops-worker-secret-32chars';
+async function runWorker({ headers = {}, env = {}, processRevocations = async () => ({ processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'ok' }), batch = 200 } = {}) {
+  return run({ action: 'revocation-worker', batch }, {
+    env: { ...env, MYOPS_CRON_SECRET: workerSecret },
+    headers: { ...headers },
+    appAccessFactory: () => ({ processRevocations }),
+  });
+}
+
+test('worker: missing authorization is rejected', async () => {
+  const result = await runWorker({ processRevocations: async () => assert.fail('worker should not run without auth') });
+  assert.equal(result.code, 401);
+});
+
+test('worker: incorrect authorization is rejected', async () => {
+  const result = await runWorker({
+    headers: { 'x-myops-cron-secret': 'wrong-secret-not-valid-xyz' },
+    processRevocations: async () => assert.fail('worker should not run with bad auth'),
+  });
+  assert.equal(result.code, 401);
+});
+
+test('worker: valid authorization executes and returns safe aggregate metrics', async () => {
+  let called = 0;
+  const result = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret },
+    batch: 25,
+    processRevocations: async ({ batch: size }) => {
+      called += 1;
+      assert.equal(size, 25);
+      return { processed: 12, retried: 7, retry_failed: 2, expired_logins: 3, revoked_app_sessions: 4, revoked_tickets: 5, deleted_logins: 1, queued: 1, status: 'ok' };
+    },
+  });
+  assert.equal(result.code, 200);
+  assert.equal(called, 1);
+  assert.deepEqual(result.data, {
+    ok: true,
+    processed: 12,
+    retried: 7,
+    retry_failed: 2,
+    expired_logins: 3,
+    revoked_app_sessions: 4,
+    revoked_tickets: 5,
+    deleted_logins: 1,
+    queued: 1,
+    status: 'ok',
+  });
+});
+
+test('worker: database unavailable fails closed', async () => {
+  const result = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret },
+    processRevocations: async () => { throw new Error('database unavailable'); },
+  });
+  assert.equal(result.code, 503);
+  assert.equal(result.data.error, 'Revocation worker is unavailable.');
+});
+
+test('worker: empty queue returns zero counts and success status', async () => {
+  const result = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret },
+    processRevocations: async () => ({ processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'empty' }),
+  });
+  assert.equal(result.code, 200);
+  assert.equal(result.data.status, 'empty');
+  assert.equal(result.data.processed, 0);
+});
+
+test('worker: pending retry metrics are safe and query-safe', async () => {
+  const result = await runWorker({
+    headers: { authorization: `Bearer ${workerSecret}` },
+    processRevocations: async () => ({ processed: 1, retried: 1, retry_failed: 0, expired_logins: 1, revoked_app_sessions: 1, revoked_tickets: 1, deleted_logins: 0, queued: 1, status: 'retry_pending' }),
+  });
+  assert.equal(result.code, 200);
+  assert.equal(result.data.status, 'retry_pending');
+  assert.equal(result.data.retried, 1);
+  assert.equal(result.data.queued, 1);
+});
+
+test('worker: duplicate execution does not mutate the result payload', async () => {
+  const processRevocations = async () => ({ processed: 4, retried: 2, retry_failed: 0, expired_logins: 2, revoked_app_sessions: 2, revoked_tickets: 2, deleted_logins: 0, queued: 0, status: 'ok' });
+  const first = await runWorker({ headers: { 'x-myops-cron-secret': workerSecret }, processRevocations });
+  const second = await runWorker({ headers: { 'x-myops-cron-secret': workerSecret }, processRevocations });
+  assert.equal(first.code, 200);
+  assert.equal(second.code, 200);
+  assert.deepEqual(first.data, second.data);
+});
+
+test('worker: concurrent executions all succeed with correct authorization', async () => {
+  const processRevocations = async () => ({ processed: 3, retried: 1, retry_failed: 0, expired_logins: 1, revoked_app_sessions: 1, revoked_tickets: 1, deleted_logins: 0, queued: 0, status: 'ok' });
+  const results = await Promise.all([
+    runWorker({ headers: { 'x-myops-cron-secret': workerSecret }, processRevocations }),
+    runWorker({ headers: { 'x-myops-cron-secret': workerSecret }, processRevocations }),
+    runWorker({ headers: { 'x-myops-cron-secret': workerSecret }, processRevocations }),
+  ]);
+  assert.ok(results.every((result) => result.code === 200));
+  assert.ok(results.every((result) => result.data.processed === 3));
+});
+
+test('worker: retry cap reached is surfaced without exposing raw queue state', async () => {
+  const result = await runWorker({
+    headers: { 'x-myops-cron-secret': workerSecret },
+    processRevocations: async () => ({ processed: 0, retried: 0, retry_failed: 1, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'retry_cap_reached' }),
+  });
+  assert.equal(result.code, 200);
+  assert.equal(result.data.status, 'retry_cap_reached');
+  assert.equal(result.data.retry_failed, 1);
+});
