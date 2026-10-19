@@ -331,6 +331,8 @@ select {
   container-type: inline-size;
   position: relative;
   min-height: 420px;
+  padding-bottom: 76px;
+  box-sizing: border-box;
   border-radius: 28px;
   border: 1px solid rgba(7, 27, 73, 0.06);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 250, 248, 1));
@@ -385,6 +387,7 @@ select {
   display: grid;
   gap: 4px;
   margin: 12px 22px 0;
+  padding-right: 68px;
   font-size: 1rem;
   font-weight: 700;
   line-height: 1.4;
@@ -393,6 +396,7 @@ select {
 
 .product-desc {
   margin: 12px 22px 0;
+  padding-right: 68px;
   color: var(--muted);
   line-height: 1.7;
   font-size: 0.97rem;

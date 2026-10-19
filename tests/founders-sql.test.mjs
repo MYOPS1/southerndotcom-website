@@ -400,7 +400,15 @@ async function liveSession(user, app = 'opsp') {
 }
 const validate = (id, touch = false) => call(`select public.myops_validate_app_session(${q(id)}, 'opsp', 'opsp', ${touch})`);
 async function resetRollbackState() {
-  await sql(`delete from public.myops_app_audit; delete from public.myops_app_sessions; delete from public.myops_app_tickets; delete from public.myops_app_nonces; delete from public.myops_app_rate_limits; delete from public.myops_revocation_requests; delete from public.myops_login_sessions;`);
+  await sql(`do $$ begin
+    if to_regclass('public.myops_app_audit') is not null then delete from public.myops_app_audit; end if;
+    if to_regclass('public.myops_app_sessions') is not null then delete from public.myops_app_sessions; end if;
+    if to_regclass('public.myops_app_tickets') is not null then delete from public.myops_app_tickets; end if;
+    if to_regclass('public.myops_app_nonces') is not null then delete from public.myops_app_nonces; end if;
+    if to_regclass('public.myops_app_rate_limits') is not null then delete from public.myops_app_rate_limits; end if;
+    if to_regclass('public.myops_revocation_requests') is not null then delete from public.myops_revocation_requests; end if;
+    if to_regclass('public.myops_login_sessions') is not null then delete from public.myops_login_sessions; end if;
+  end $$;`);
   await sql(`update public.myops_app_clients set enabled = false;`);
   await applyFile('202610170001_myops_app_access.sql');
   await applyFile('202610170002_myops_login_sessions.sql');
