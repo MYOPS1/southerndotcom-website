@@ -13,6 +13,9 @@ const SessionContext = createContext({ ...SignedOut, enabled: false, refresh: as
 export function SessionProvider({ enabled, children }) {
   const [state, setState] = useState(enabled ? { status: 'loading', signedIn: false, products: null, lifetime: false } : SignedOut);
   const lastActivity = useRef(0);
+  const logoutPending = useRef(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
 
   const refresh = useCallback(async (activity = true) => {
     if (!enabled) return;
@@ -47,16 +50,22 @@ export function SessionProvider({ enabled, children }) {
   }, [enabled, refresh]);
 
   const logout = useCallback(async () => {
+    if (logoutPending.current) return;
+    logoutPending.current = true;
+    setLogoutBusy(true);
+    setLogoutError('');
     try {
       const result = await authRequest('logout');
       window.location.replace(result.next);
-    } catch {
-      setState(SignedOut);
-      window.location.replace('/');
+    } catch (error) {
+      setLogoutError(`Sign out could not be confirmed. ${error.message} Please retry Logout.`);
+    } finally {
+      logoutPending.current = false;
+      setLogoutBusy(false);
     }
   }, []);
 
-  const value = useMemo(() => ({ ...state, enabled, refresh, logout }), [state, enabled, refresh, logout]);
+  const value = useMemo(() => ({ ...state, enabled, refresh, logout, logoutBusy, logoutError }), [state, enabled, refresh, logout, logoutBusy, logoutError]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 SessionProvider.propTypes = { enabled: PropTypes.bool.isRequired, children: PropTypes.node.isRequired };
@@ -69,11 +78,12 @@ export function useSession() {
 export function AuthNav() {
   const session = useSession();
   if (!session.enabled || session.status === 'loading') return null;
-  if (session.signedIn) {
+  if (session.signedIn || session.logoutError) {
     return (
       <div className="nav-auth">
         <a href="/account" className="btn btn-secondary">My Account</a>
-        <button type="button" className="btn btn-primary" onClick={session.logout}>Logout</button>
+        <button type="button" className="btn btn-primary" disabled={session.logoutBusy} onClick={session.logout}>{session.logoutBusy ? 'Signing out…' : 'Logout'}</button>
+        {session.logoutError && <p role="alert">{session.logoutError}</p>}
       </div>
     );
   }
