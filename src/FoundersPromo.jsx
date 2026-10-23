@@ -4,16 +4,6 @@ import { useSession } from './session';
 
 const POLL_MS = 3000;
 const POLL_MAX = 10;
-const LABELS = { opsp: 'OpsPS', opsfinance: 'OpsFinance', opsflow: 'OpsFlow', opswms: 'OpsWMS', opshr: 'OpsHR' };
-// Proposed pricing is shown for transparency only; the server and database keep it disabled.
-const PROPOSED = [
-  { name: 'Two-app bundle', price: 'RM49/month', note: 'Any two apps' },
-  { name: 'All-app bundle', price: 'RM79/month', note: 'Every live app' },
-  { name: 'Business Basic', price: 'Pricing to be confirmed', note: 'Up to 5 users' },
-  { name: 'Business Pro', price: 'Pricing to be confirmed', note: 'Up to 20 users' },
-  { name: 'Enterprise', price: 'Custom', note: 'Contact us' },
-];
-
 // Display only. Slot counts come from the server and access is re-checked server-side.
 export function FoundersPromo() {
   const session = useSession();
@@ -21,7 +11,6 @@ export function FoundersPromo() {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
-  const [app, setApp] = useState('');
   const polls = useRef(0);
 
   const loadFounders = useCallback(() => authRequest('founders').then(setFounders).catch(() => setFounders({ available: false })), []);
@@ -58,7 +47,7 @@ export function FoundersPromo() {
   const soldOut = founders && founders.available === false && founders.remaining === 0;
   let action;
   if (session.signedIn && session.lifetime) {
-    action = <p className="founders-note" role="status">Your Founders 100 lifetime access is active. Open any app from the cards below.</p>;
+    action = <p className="founders-note" role="status">Your Founders 100 lifetime access is active. Open your apps from the MYOPS homepage.</p>;
   } else if (!session.signedIn) {
     action = (
       <div className="founders-actions">
@@ -67,30 +56,18 @@ export function FoundersPromo() {
       </div>
     );
   } else if (soldOut) {
-    const choices = Object.entries(session.products || {}).filter(([, state]) => state === 'none').map(([slug]) => slug);
-    action = choices.length ? (
-      <div className="founders-actions">
-        <label>
-          Choose one app{' '}
-          <select value={app || choices[0]} onChange={(event) => setApp(event.target.value)}>
-            {choices.map((slug) => <option key={slug} value={slug}>{LABELS[slug] || slug}</option>)}
-          </select>
-        </label>
-        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => start('single_app_monthly', choices.includes(app) ? app : choices[0])}>Subscribe — RM29/month</button>
-      </div>
-    ) : <p className="founders-note">You already have access to every available app.</p>;
+    action = <p className="founders-note">All Founders 100 places are taken. Choose a monthly plan below when subscriptions open.</p>;
   } else if (founders?.available) {
     action = <button type="button" className="btn btn-primary" disabled={busy} onClick={() => start('founders_lifetime')}>Claim lifetime access — RM29 once</button>;
   } else {
     action = <p className="founders-note">Checkout is not available right now.</p>;
   }
 
-  const inSingle = soldOut && !(session.signedIn && session.lifetime);
   return (
     <section className="content-section founders-promo" id="founders" aria-labelledby="founders-title">
       <div className="container">
         <p className="section-label">Subscription &amp; Pricing</p>
-        <h2 id="founders-title">RM29 once for lifetime access to every MYOPS app</h2>
+        <h2 id="founders-title">Choose your MYOPS plan</h2>
         <div className="pricing-cards">
           <article className="price-card price-card-featured">
             <h3>Founders 100</h3>
@@ -101,28 +78,24 @@ export function FoundersPromo() {
                 <strong>{founders.remaining}</strong> of {founders.capacity} Founder places remaining
               </p>
             )}
-            {inSingle ? <p className="founders-note">All Founders 100 places are taken.</p> : action}
+            {action}
           </article>
           <article className="price-card">
-            <h3>Single App</h3>
-            <p className="price-amount">RM29 <span>/ month</span></p>
-            <p>One selected app, renewed monthly. Available after all 100 Founder places are allocated; Individual accounts only.</p>
-            {inSingle ? action : <p className="founders-note">Not yet available.</p>}
+            <h3>2 Apps</h3>
+            <p className="price-amount">RM49 <span>/ month</span></p>
+            <p>Choose any two available MYOPS apps. Renewed monthly.</p>
+            <button type="button" className="btn btn-secondary" disabled>Subscriptions opening soon</button>
+          </article>
+          <article className="price-card">
+            <h3>All Apps</h3>
+            <p className="price-amount">RM79 <span>/ month</span></p>
+            <p>Access every available MYOPS app. Renewed monthly.</p>
+            <button type="button" className="btn btn-secondary" disabled>Subscriptions opening soon</button>
           </article>
         </div>
         {waiting && <p role="status">Confirming your payment…</p>}
         <p role="status" className="founders-error">{message}</p>
-        <ul className="founders-proposed" aria-label="Proposed plans, not yet available">
-          {PROPOSED.map((plan) => (
-            <li key={plan.name} className="price-card price-card-muted">
-              <h3>{plan.name}</h3>
-              <p className="price-amount">{plan.price}</p>
-              <p>{plan.note}</p>
-              <button type="button" className="btn btn-secondary" disabled>Coming Soon</button>
-            </li>
-          ))}
-        </ul>
-        <p className="founders-note">Two-app, All-app and Business plans are pending owner approval and cannot be purchased. Business billing is disabled.</p>
+        <p className="founders-note">Monthly subscriptions are not open for purchase yet.</p>
         <p className="founders-note">Sandbox payments only: no real money is charged in Preview. Payments are verified server-side before access is granted.</p>
       </div>
     </section>
