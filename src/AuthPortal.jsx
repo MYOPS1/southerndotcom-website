@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
 import { authRequest as request } from './authRequest';
+import { jumpToFounders } from './session';
 
 const productLabels = { opsp: 'OpsPS', opsfinance: 'OpsFinance', opsflow: 'OpsFlow', opswms: 'OpsWMS', opshr: 'OpsHR' };
 
@@ -74,7 +75,7 @@ export function AuthPortal({ mode }) {
                 {Object.entries(productLabels).map(([slug, label]) => (
                   <li id={`subscription-${slug}`} key={slug}>
                     {label}: {({ active: 'Active subscription', none: 'No subscription', coming_soon: 'Coming soon' })[account.products[slug]]}
-                    {account.products[slug] === 'none' && <> — <a className="btn btn-secondary" href="/#founders">View Founders 100 and All Apps offer</a></>}
+                    {account.products[slug] === 'none' && <> — <a className="btn btn-secondary" href="/#founders" onClick={jumpToFounders}>View Founders 100 and All Apps offer</a></>}
                   </li>
                 ))}
               </ul>

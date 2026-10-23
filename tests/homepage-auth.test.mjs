@@ -69,6 +69,22 @@ test('signed-in users see My Account and Logout instead of Register and Login', 
   } finally { await cleanup(); }
 });
 
+test('signed-in subscribe links open the founders offer section instead of doing nothing', async () => {
+  const { cleanup, dom } = await mount(() => Response.json(signedInState()));
+  const original = Element.prototype.scrollIntoView;
+  let scrolled = false;
+  Element.prototype.scrollIntoView = function () { scrolled = true; };
+  try {
+    const link = document.querySelector('#opsfinance a');
+    assert.equal(link.getAttribute('href'), '/#founders');
+    await act(async () => link.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true })));
+    assert.ok(scrolled || dom.window.location.hash === '#founders');
+  } finally {
+    Element.prototype.scrollIntoView = original;
+    await cleanup();
+  }
+});
+
 test('product cards reflect Active, No subscription and Coming Soon states from the server', async () => {
   const { cleanup } = await mount(() => Response.json(signedInState({ opsflow: 'coming_soon' })));
   try {

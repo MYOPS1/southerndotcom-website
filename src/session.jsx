@@ -7,6 +7,22 @@ const SignedOut = { status: 'ready', signedIn: false, products: null, lifetime: 
 
 const SessionContext = createContext({ ...SignedOut, enabled: false, refresh: async () => {}, logout: async () => {} });
 
+export function jumpToFounders(event) {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  const target = typeof document !== 'undefined' ? document.getElementById('founders') : null;
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const next = typeof window !== 'undefined' ? `${window.location.pathname || '/'}#founders` : '/#founders';
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', next);
+    }
+    return;
+  }
+  if (typeof window !== 'undefined') {
+    window.location.assign('/#founders');
+  }
+}
+
 // Browser state is display-only. The server re-validates identity and subscriptions for every
 // protected operation, so editing this state can never unlock an application.
 export function SessionProvider({ enabled, children }) {
@@ -114,7 +130,13 @@ export function ProductAction({ product }) {
   }
   return (
     <div className="product-action">
-      <a className="btn btn-secondary" href={session.signedIn ? '/#founders' : '/login'}>Subscribe</a>
+      <a
+        className="btn btn-secondary"
+        href={session.signedIn ? '/#founders' : '/login'}
+        onClick={session.signedIn ? jumpToFounders : undefined}
+      >
+        Subscribe
+      </a>
     </div>
   );
 }
