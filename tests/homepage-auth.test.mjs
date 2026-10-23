@@ -143,3 +143,29 @@ test('outside Preview auth builds no auth controls and no requests are made', as
     assert.equal(document.querySelector('.product-action'), null);
   } finally { await cleanup(); }
 });
+
+test('logout failure stays visible and retryable, including after a signed-out probe', async () => {
+  let signedIn = true;
+  let finishLogout;
+  const { calls, cleanup, dom } = await mount((body) => body.action === 'logout'
+    ? new Promise((resolve) => { finishLogout = resolve; })
+    : Response.json(signedIn ? signedInState() : signedOut));
+  const click = (selector) => document.querySelector(selector).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  try {
+    await act(async () => { click('.nav-auth button'); click('.nav-auth button'); });
+    assert.equal(calls.filter((body) => body.action === 'logout').length, 1);
+    assert.equal(document.querySelector('.nav-auth button').disabled, true);
+    await act(async () => finishLogout(Response.json({ error: 'Session revocation unavailable.' }, { status: 503 })));
+    assert.match(text('[role=alert]'), /Sign out could not be confirmed/);
+    assert.equal(document.querySelector('.nav-auth button').disabled, false);
+    signedIn = false;
+    await act(async () => click('#passive'));
+    assert.equal(text('.nav-auth button'), 'Logout');
+    assert.equal(document.querySelector('#opsp button'), null);
+    await act(async () => click('.nav-auth button'));
+    assert.equal(calls.filter((body) => body.action === 'logout').length, 2);
+    await act(async () => finishLogout(Response.json({ error: 'Retry later.' }, { status: 503 })));
+    assert.match(text('[role=alert]'), /Retry later/);
+    assert.equal(dom.window.location.href, 'https://trusted-preview.vercel.app/');
+  } finally { await cleanup(); }
+});
