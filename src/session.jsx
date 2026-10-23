@@ -1,27 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
 import { authRequest } from './authRequest';
+import { jumpToFounders } from './foundersNav';
 
 const PROBE_INTERVAL_MS = 60 * 1000;
 const SignedOut = { status: 'ready', signedIn: false, products: null, lifetime: false };
 
 const SessionContext = createContext({ ...SignedOut, enabled: false, refresh: async () => {}, logout: async () => {} });
-
-export function jumpToFounders(event) {
-  if (event && typeof event.preventDefault === 'function') event.preventDefault();
-  const target = typeof document !== 'undefined' ? document.getElementById('founders') : null;
-  if (target) {
-    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    const next = typeof window !== 'undefined' ? `${window.location.pathname || '/'}#founders` : '/#founders';
-    if (typeof window !== 'undefined') {
-      window.history.pushState({}, '', next);
-    }
-    return;
-  }
-  if (typeof window !== 'undefined') {
-    window.location.assign('/#founders');
-  }
-}
 
 // Browser state is display-only. The server re-validates identity and subscriptions for every
 // protected operation, so editing this state can never unlock an application.

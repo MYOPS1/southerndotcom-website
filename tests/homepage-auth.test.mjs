@@ -25,9 +25,15 @@ function Page({ enabled = true }) {
 
 async function mount(respond, enabled = true) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'https://trusted-preview.vercel.app/' });
-  const originals = Object.fromEntries(['window', 'document', 'fetch', 'IS_REACT_ACT_ENVIRONMENT'].map((key) => [key, globalThis[key]]));
+  const originals = Object.fromEntries(['window', 'document', 'Element', 'HTMLElement', 'fetch', 'IS_REACT_ACT_ENVIRONMENT'].map((key) => [key, globalThis[key]]));
   const calls = [];
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    Element: dom.window.Element,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
   globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     calls.push(body);
