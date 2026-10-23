@@ -781,6 +781,19 @@ const routePageMap = {
 };
 
 function PricingPage() {
+  if (import.meta.env.MODE === 'preview-auth') {
+    return (
+      <PageShell pageClass="page-shell-plain">
+        <FoundersPromo />
+        <section className="content-section">
+          <div className="container narrow-content">
+            <SectionIntro label="Services" title="Website & application solutions" text="Custom website development, business applications and integrations are quoted separately based on project scope." />
+            <a href="/contact" className="btn btn-primary">Get a Quote</a>
+          </div>
+        </section>
+      </PageShell>
+    );
+  }
   return (
     <PageShell pageClass="page-shell-plain">
       <section className="page-hero">
