@@ -529,16 +529,16 @@ function LandingPage() {
 
       <FoundersPromo />
 
-      <section className="content-section alt-panel">
-        <div className="container two-column">
+      <section className="content-section alt-panel home-benefits">
+        <div className="container">
           <div>
             <SectionIntro
               label="Ecosystem"
-              title="A connected operating layer for every business function"
-              text="MYOPS helps teams work from one common operational core without losing the specialisation of each product line."
+              title="One ecosystem. A clearer way to work."
+              text="Connect your daily operations, workflows and finances with tools built around your business."
             />
           </div>
-          <div className="feature-stack">
+          <div className="feature-stack home-benefit-grid">
             <div className="feature-card">
               <span>01</span>
               <h3>Market visibility</h3>
@@ -558,32 +558,29 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="content-section">
-        <div className="container two-column service-showcase">
+      <section className="content-section home-services">
+        <div className="container home-service-layout">
           <div>
             <SectionIntro
               label="Southern Dotcom Service"
               title="Website & Business Application Development"
-              text="We design and build professional websites and custom business applications tailored to your business needs — from company websites and customer portals to internal management systems and complete digital solutions."
+              text="Need something tailored to your business? We build websites, portals and applications around the way you work."
             />
             <div className="inline-actions">
               <a href="/contact" className="btn btn-primary">Get a Quote</a>
-              <a href="/contact" className="btn btn-secondary">Discuss Your Project</a>
+              <a href="/solutions/business-website-application-development" className="btn btn-secondary">Explore Services</a>
             </div>
           </div>
-          <div className="feature-stack">
-            {digitalDevelopmentScope.map((item, index) => (
-              <div className="feature-card" key={item}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
-                <h3>{item}</h3>
-                <p>Practical digital support built around the way your business operates.</p>
-              </div>
-            ))}
+          <div className="home-service-panel">
+            <h3>What we can build for you</h3>
+            <ul className="home-service-list">
+              {digitalDevelopmentScope.map((item) => <li key={item}>{item}</li>)}
+            </ul>
           </div>
         </div>
       </section>
 
-      <section className="content-section alt-panel">
+      <section className="content-section alt-panel home-company">
         <div className="container company-summary-grid">
           <div>
             <SectionIntro label="About" title="Built by Southern Dotcom Enterprise" text="MYOPS is a business technology ecosystem focused on operational clarity and execution for modern teams." />
@@ -598,12 +595,12 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="content-section">
+      <section className="content-section home-faq">
         <div className="container faq-preview">
           <SectionIntro label="FAQ" title="Common questions" />
           <div className="faq-list compact">
             {faqItems.slice(0, 3).map((item) => (
-              <details key={item.q} open>
+              <details key={item.q}>
                 <summary>{item.q}</summary>
                 <p>{item.a}</p>
               </details>
