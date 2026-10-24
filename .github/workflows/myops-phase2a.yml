@@ -1,0 +1,50 @@
+name: MYOPS validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - recovery/phase1b-security-ui
+      - fix/myops-logout-retry
+      - feature/myops-central-auth-foundation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install local PostgreSQL test binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-16
+          test -x /usr/lib/postgresql/16/bin/initdb
+      - name: Lint
+        run: npm run lint
+      - name: Test handlers, UI and isolated PostgreSQL proposals
+        run: npm test
+      - name: Build Production
+        run: npm run build
+      - name: Build Preview authentication
+        run: npm run build
+        env:
+          VERCEL_ENV: preview
+
+      - name: Build official-domain account authentication
+        run: npm run build
+        env:
+          VERCEL_ENV: production
+          MYOPS_ENABLE_PRODUCTION_AUTH: 'true'

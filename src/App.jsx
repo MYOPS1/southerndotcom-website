@@ -1,4 +1,9 @@
 import PropTypes from 'prop-types';
+import { AccountPreview } from './AccountPreview';
+import { AuthPortal } from './AuthPortal';
+import { AuthNav, ProductAction, SessionProvider } from './session';
+import { FoundersPromo } from './FoundersPromo';
+import { AdminAudit } from './AdminAudit';
 import { useEffect, useState } from 'react';
 import {
   AcceptableUsePage,
@@ -20,16 +25,6 @@ const companyDetails = {
 
 const products = [
   {
-    slug: 'opsp',
-    name: 'OpsPS',
-    tag: ['Personal Shopper', 'Operations'],
-    icon: 'PS',
-    accent: 'pink',
-    art: 'opsps',
-    href: '/solutions/opsp',
-    summary: 'Support product, trip, order and customer operations with a streamlined, data-rich workflow.',
-  },
-  {
     slug: 'opsfinance',
     name: 'OpsFinance',
     tag: ['Accounting &', 'Financial Management'],
@@ -37,7 +32,7 @@ const products = [
     accent: 'purple',
     art: 'opsfinance',
     href: '/solutions/opsfinance',
-    summary: 'Keep financial data, cash flow and accountability aligned across your operations.',
+    summary: 'Keep accounting, cash flow and accountability aligned.',
   },
   {
     slug: 'opsflow',
@@ -47,17 +42,17 @@ const products = [
     accent: 'blue',
     art: 'opsflow',
     href: '/solutions/opsflow',
-    summary: 'Automate processes and handoffs so teams can move faster with less operational noise.',
+    summary: 'Automate processes and handoffs to move faster.',
   },
   {
-    slug: 'opswms',
-    name: 'OpsWMS',
-    tag: ['Warehouse', 'Management System'],
-    icon: 'WM',
-    accent: 'teal',
-    art: 'opswms',
-    comingSoon: true,
-    summary: 'Manage warehouse inventory, pallet locations, inbound, outbound and stock accuracy.',
+    slug: 'opsp',
+    name: 'OpsPS',
+    tag: ['Personal Shopper', 'Operations'],
+    icon: 'PS',
+    accent: 'pink',
+    art: 'opsps',
+    href: '/solutions/opsp',
+    summary: 'Manage products, trips, orders and customers in one workflow.',
   },
   {
     slug: 'opshr',
@@ -67,7 +62,17 @@ const products = [
     accent: 'orange',
     art: 'opshr',
     comingSoon: true,
-    summary: 'Manage employee records, attendance, leave and HR operations in one place.',
+    summary: 'Manage employee records, attendance and leave.',
+  },
+  {
+    slug: 'opswms',
+    name: 'OpsWMS',
+    tag: ['Warehouse', 'Management System'],
+    icon: 'WM',
+    accent: 'teal',
+    art: 'opswms',
+    comingSoon: true,
+    summary: 'Track warehouse stock, locations and movements.',
   },
 ];
 
@@ -122,8 +127,20 @@ const resources = [
   { title: 'PDPA notice', href: '/pdpa', type: 'Policy' },
 ];
 
+const customerAuthEnabled = ['preview-auth', 'production-auth'].includes(import.meta.env.MODE);
+const portal = (mode) => customerAuthEnabled
+  ? <AuthPortal mode={mode} production={import.meta.env.MODE === 'production-auth'} />
+  : <AccountPreview mode={['dashboard', 'login', 'register'].includes(mode) ? mode : 'login'} />;
+
 const routes = {
   '/': LandingPage,
+  '/login': () => <PageShell>{portal('login')}</PageShell>,
+  '/register': () => <PageShell>{portal('register')}</PageShell>,
+  '/forgot-password': () => <PageShell>{portal('forgot')}</PageShell>,
+  '/account/update-password': () => <PageShell>{portal('reset')}</PageShell>,
+  '/auth/callback': () => <PageShell>{portal('callback')}</PageShell>,
+  '/account': () => <PageShell>{portal('dashboard')}</PageShell>,
+  '/admin/audit': () => <PageShell>{import.meta.env.MODE === 'preview-auth' ? <AdminAudit /> : portal('login')}</PageShell>,
   '/solutions': SolutionsPage,
   '/solutions/opsp': SolutionPage,
   '/solutions/opsfinance': SolutionPage,
@@ -339,6 +356,7 @@ function SiteHeader() {
             </a>
           ))}
         </nav>
+        <AuthNav />
       </div>
     </header>
   );
@@ -449,7 +467,7 @@ function LandingPage() {
               You Work
             </h1>
             <p>
-              Practical business technology to help you manage, sell, operate and grow — all in one ecosystem.
+              Practical business technology to manage, sell, operate and grow — in one ecosystem.
             </p>
             <div className="hero-actions">
               <a href="/solutions" className="btn btn-primary hero-cta">
@@ -469,30 +487,9 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="trust-band">
-        <div className="container trust-grid">
-          <div>
-            <strong>One ecosystem</strong>
-            <span>Operations, commerce, finance and workflows connected.</span>
-          </div>
-          <div>
-            <strong>Modern operations</strong>
-            <span>Built for growing businesses that need clarity and speed.</span>
-          </div>
-          <div>
-            <strong>Simple support</strong>
-            <span>Contact the team through phone, email or the contact page.</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="content-section">
+      <section className="content-section apps-section" id="applications">
         <div className="container">
-          <SectionIntro
-            label="Solutions"
-            title="Built for the way modern teams operate"
-            text="MYOPS connects business systems so product, service, financial and operational teams can act in one shared operating layer."
-          />
+          <SectionIntro label="Our Applications" title="Built for the way modern teams operate" />
 
           <div className="product-grid">
             {products.map((product) => (
@@ -518,9 +515,12 @@ function LandingPage() {
                 {product.comingSoon ? (
                   <span className="coming-soon-label">Coming Soon</span>
                 ) : (
-                  <a href={product.href} className="card-link" aria-label={product.name}>
-                    <span aria-hidden="true">→</span>
-                  </a>
+                  <>
+                    <a href={product.href} className="card-link" aria-label={product.name}>
+                      <span aria-hidden="true">→</span>
+                    </a>
+                    <ProductAction product={product} />
+                  </>
                 )}
               </article>
             ))}
@@ -528,16 +528,18 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="content-section alt-panel">
-        <div className="container two-column">
+      <FoundersPromo production={import.meta.env.MODE === 'production-auth'} />
+
+      <section className="content-section alt-panel home-benefits">
+        <div className="container">
           <div>
             <SectionIntro
               label="Ecosystem"
-              title="A connected operating layer for every business function"
-              text="MYOPS helps teams work from one common operational core without losing the specialisation of each product line."
+              title="One ecosystem. A clearer way to work."
+              text="Connect your daily operations, workflows and finances with tools built around your business."
             />
           </div>
-          <div className="feature-stack">
+          <div className="feature-stack home-benefit-grid">
             <div className="feature-card">
               <span>01</span>
               <h3>Market visibility</h3>
@@ -557,48 +559,29 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="content-section">
-        <div className="container two-column service-showcase">
+      <section className="content-section home-services">
+        <div className="container home-service-layout">
           <div>
             <SectionIntro
               label="Southern Dotcom Service"
               title="Website & Business Application Development"
-              text="We design and build professional websites and custom business applications tailored to your business needs — from company websites and customer portals to internal management systems and complete digital solutions."
+              text="Need something tailored to your business? We build websites, portals and applications around the way you work."
             />
             <div className="inline-actions">
               <a href="/contact" className="btn btn-primary">Get a Quote</a>
-              <a href="/contact" className="btn btn-secondary">Discuss Your Project</a>
+              <a href="/solutions/business-website-application-development" className="btn btn-secondary">Explore Services</a>
             </div>
           </div>
-          <div className="feature-stack">
-            {digitalDevelopmentScope.map((item, index) => (
-              <div className="feature-card" key={item}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
-                <h3>{item}</h3>
-                <p>Practical digital support built around the way your business operates.</p>
-              </div>
-            ))}
+          <div className="home-service-panel">
+            <h3>What we can build for you</h3>
+            <ul className="home-service-list">
+              {digitalDevelopmentScope.map((item) => <li key={item}>{item}</li>)}
+            </ul>
           </div>
         </div>
       </section>
 
-      <section className="content-section">
-        <div className="container pricing-teaser">
-          <div>
-            <SectionIntro
-              label="Business-ready"
-              title="Choose the right MYOPS path for your operations"
-              text="Whether you are streamlining order operations, marketplace activity or finance and workflow coordination, MYOPS is designed to scale with your business."
-            />
-          </div>
-          <div className="cta-panel">
-            <a href="/pricing" className="btn btn-primary">Review pricing</a>
-            <a href="/contact" className="btn btn-secondary">Talk to the team</a>
-          </div>
-        </div>
-      </section>
-
-      <section className="content-section alt-panel">
+      <section className="content-section alt-panel home-company">
         <div className="container company-summary-grid">
           <div>
             <SectionIntro label="About" title="Built by Southern Dotcom Enterprise" text="MYOPS is a business technology ecosystem focused on operational clarity and execution for modern teams." />
@@ -613,12 +596,12 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="content-section">
+      <section className="content-section home-faq">
         <div className="container faq-preview">
           <SectionIntro label="FAQ" title="Common questions" />
           <div className="faq-list compact">
             {faqItems.slice(0, 3).map((item) => (
-              <details key={item.q} open>
+              <details key={item.q}>
                 <summary>{item.q}</summary>
                 <p>{item.a}</p>
               </details>
@@ -796,6 +779,19 @@ const routePageMap = {
 };
 
 function PricingPage() {
+  if (customerAuthEnabled) {
+    return (
+      <PageShell pageClass="page-shell-plain">
+        <FoundersPromo production={import.meta.env.MODE === 'production-auth'} />
+        <section className="content-section">
+          <div className="container narrow-content">
+            <SectionIntro label="Services" title="Website & application solutions" text="Custom website development, business applications and integrations are quoted separately based on project scope." />
+            <a href="/contact" className="btn btn-primary">Get a Quote</a>
+          </div>
+        </section>
+      </PageShell>
+    );
+  }
   return (
     <PageShell pageClass="page-shell-plain">
       <section className="page-hero">
@@ -1025,6 +1021,7 @@ export default function App() {
 
   const PageComponent = routes[pathname] || LandingPage;
 
+  let page = <PageComponent />;
   if (
     pathname === '/solutions/opsp' ||
     pathname === '/solutions/opsfinance' ||
@@ -1032,8 +1029,8 @@ export default function App() {
     pathname === '/solutions/business-website-application-development' ||
     pathname === '/services/web-and-business-applications'
   ) {
-    return routePageMap[pathname] ? routePageMap[pathname]() : <PageComponent />;
+    page = routePageMap[pathname] ? routePageMap[pathname]() : <PageComponent />;
   }
 
-  return <PageComponent />;
+  return <SessionProvider enabled={customerAuthEnabled}>{page}</SessionProvider>;
 }
