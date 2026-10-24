@@ -248,11 +248,15 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     const reply = (status, body) => res.status(status).json(body);
-    // Do not enable auth on production even if someone adds production variables.
-    if (env.VERCEL_ENV !== 'preview') return reply(404, { error: 'Authentication is Preview-only.' });
-    const origin = env.VERCEL_BRANCH_URL ? `https://${env.VERCEL_BRANCH_URL}` : '';
+    // Official-domain login requires an explicit deployment opt-in. Never trust a caller's host.
+    const production = env.VERCEL_ENV === 'production';
+    if (env.VERCEL_ENV !== 'preview' && !(production && env.MYOPS_ENABLE_PRODUCTION_AUTH === 'true')) {
+      return reply(404, { error: 'Authentication is not enabled for this deployment.' });
+    }
+    const origin = production ? 'https://www.myops.com.my'
+      : env.VERCEL_BRANCH_URL ? `https://${env.VERCEL_BRANCH_URL}` : '';
     if (!origin || req.headers.host !== new URL(origin).host) {
-      return reply(403, { error: 'Use the trusted branch Preview URL.' });
+      return reply(403, { error: 'Use the trusted MYOPS website URL.' });
     }
     if (req.method !== 'POST') return reply(405, { error: 'Method not allowed.' });
     // All operations, including anonymous login/signup, require same-origin JSON POST.
@@ -311,11 +315,16 @@ export function createAuthHandler({ env = process.env, clientFactory = createCli
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
       if (!body || JSON.stringify(body).length > 12000) return reply(400, { error: 'Invalid request.' });
       const { action } = body;
+      // Official-domain rollout is account-only; billing, app launches and workers stay disabled.
+      if (production && !['register', 'login', 'forgot', 'callback', 'logout', 'session', 'account', 'reset', 'profile', 'founders'].includes(action)) {
+        return reply(404, { error: 'This feature is not enabled.' });
+      }
+      if (production && action === 'founders') return reply(200, { available: false });
       const validEmail = typeof body.email === 'string' && body.email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email);
       const validPassword = typeof body.password === 'string' && body.password.length >= 12 && body.password.length <= 128;
       const callback = `${origin}/auth/callback`;
-      const payments = createPayments({ env, transport, adminFactory: clientFactory, project: PROJECT });
-      const appAccess = appAccessFactory({ env, adminFactory: clientFactory, now, project: PROJECT });
+      const payments = createPayments({ env: production ? {} : env, transport, adminFactory: clientFactory, project: PROJECT });
+      const appAccess = appAccessFactory({ env: production ? { ...env, MYOPS_ENVIRONMENT: undefined } : env, adminFactory: clientFactory, now, project: PROJECT });
       // Revocation targets only identities proven by the server (signed cookie or verified token).
       // Revokes app access for every verified id plus any unresolved pending id. A failure is never
       // reported as success: it leaves a signed pending marker and a durable server-side queue so later

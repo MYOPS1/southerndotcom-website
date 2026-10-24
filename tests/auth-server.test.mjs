@@ -862,3 +862,35 @@ test('worker: retry cap reached is surfaced without exposing raw queue state', a
   assert.equal(result.data.status, 'retry_cap_reached');
   assert.equal(result.data.retry_failed, 1);
 });
+
+test('official domain login requires opt-in and exact www host/origin', async () => {
+  const official = 'https://www.myops.com.my';
+  const production = { VERCEL_ENV: 'production', MYOPS_ENABLE_PRODUCTION_AUTH: 'true' };
+  const headers = { host: 'www.myops.com.my', origin: official };
+  const result = await run(login, { env: production, headers });
+  assert.equal(result.code, 200);
+  assert.equal(result.data.next, '/');
+  assert.ok(result.headers['Set-Cookie'].every((cookie) => cookie.includes('HttpOnly; Secure; SameSite=Lax')));
+  for (const invalid of [
+    { host: 'myops.com.my', origin: 'https://myops.com.my' },
+    { host: 'trusted-preview.vercel.app', origin },
+    { host: 'www.myops.com.my', origin: 'https://evil.example' },
+  ]) assert.equal((await run(login, { env: production, headers: invalid })).code, 403);
+  assert.equal((await run(login, { env: { ...production, MYOPS_ENABLE_PRODUCTION_AUTH: 'false' }, headers })).code, 404);
+});
+
+test('official-domain recovery callback is fixed and billing/app operations stay disabled', async () => {
+  const options = { env: { VERCEL_ENV: 'production', MYOPS_ENABLE_PRODUCTION_AUTH: 'true' },
+    headers: { host: 'www.myops.com.my', origin: 'https://www.myops.com.my' } };
+  let redirect;
+  const result = await run({ action: 'forgot', email: user.email, next: 'https://evil.example' }, {
+    ...options, client: mock({ resetPasswordForEmail: async (_email, settings) => { redirect = settings.redirectTo; return { error: null }; } }),
+  });
+  assert.equal(result.code, 200);
+  assert.equal(redirect, 'https://www.myops.com.my/auth/callback');
+  for (const action of ['checkout', 'launch', 'admin_audit', 'revocation-worker']) {
+    const blocked = await run({ action }, { ...options, client: mock({ getUser: async () => assert.fail('no identity request for disabled actions') }) });
+    assert.equal(blocked.code, 404);
+  }
+  assert.deepEqual((await run({ action: 'founders' }, options)).data, { available: false });
+});
