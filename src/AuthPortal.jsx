@@ -5,7 +5,7 @@ import { jumpToFounders } from './foundersNav';
 
 const productLabels = { opsp: 'OpsPS', opsfinance: 'OpsFinance', opsflow: 'OpsFlow', opswms: 'OpsWMS', opshr: 'OpsHR' };
 
-export function AuthPortal({ mode }) {
+export function AuthPortal({ mode, production = false }) {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [account, setAccount] = useState(null);
@@ -59,7 +59,7 @@ export function AuthPortal({ mode }) {
     <section className="account-preview container" aria-labelledby="auth-title">
       <div className="account-preview-heading"><span className="account-eyebrow">MYOPS · Customer Portal</span>
         <h1 id="auth-title">{titles[mode]}</h1>
-        <p>Secure MYOPS account access · Development Preview</p>
+        <p>Secure MYOPS account access{!production && ' · Development Preview'}</p>
       </div>
       <div className="account-preview-panel account-form-panel">
         <p role="status" aria-live="polite">{busy ? 'Please wait…' : message}</p>
@@ -81,7 +81,7 @@ export function AuthPortal({ mode }) {
               </ul>
             ) : <p>Subscription status is currently unavailable.</p>}
             {account.lifetime && <p>Founders 100 lifetime access: active (all current and future MYOPS apps).</p>}
-            <p>Preview payments use the ToyyibPay sandbox only. Application access is granted only after the server confirms a verified payment or active subscription.</p>
+            <p>{production ? 'Subscriptions and application access are not available for purchase yet.' : 'Preview payments use the ToyyibPay sandbox only. Application access is granted only after the server confirms a verified payment or active subscription.'}</p>
           </section>
           <p>Cross-app SSO is not enabled. This site signs you out after 15 minutes of inactivity.</p>
           <button type="button" className="btn btn-primary" disabled={busy} onClick={logout}>Sign out</button>
@@ -109,4 +109,4 @@ export function AuthPortal({ mode }) {
     </section>
   );
 }
-AuthPortal.propTypes = { mode: PropTypes.oneOf(['register', 'login', 'forgot', 'reset', 'callback', 'dashboard']).isRequired };
+AuthPortal.propTypes = { production: PropTypes.bool, mode: PropTypes.oneOf(['register', 'login', 'forgot', 'reset', 'callback', 'dashboard']).isRequired };

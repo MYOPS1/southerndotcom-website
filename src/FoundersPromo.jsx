@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import PropTypes from 'prop-types';
 import { authRequest } from './authRequest';
 import { useSession } from './session';
 
 const POLL_MS = 3000;
 const POLL_MAX = 10;
 // Display only. Slot counts come from the server and access is re-checked server-side.
-export function FoundersPromo() {
+export function FoundersPromo({ production = false }) {
   const session = useSession();
   const [founders, setFounders] = useState(null);
   const [message, setMessage] = useState('');
@@ -96,8 +97,10 @@ export function FoundersPromo() {
         {waiting && <p role="status">Confirming your payment…</p>}
         <p role="status" className="founders-error">{message}</p>
         <p className="founders-note">Monthly subscriptions are not open for purchase yet.</p>
-        <p className="founders-note">Sandbox payments only: no real money is charged in Preview. Payments are verified server-side before access is granted.</p>
+        <p className="founders-note">{production ? 'Payments are not available yet.' : 'Sandbox payments only: no real money is charged in Preview. Payments are verified server-side before access is granted.'}</p>
       </div>
     </section>
   );
 }
+
+FoundersPromo.propTypes = { production: PropTypes.bool };

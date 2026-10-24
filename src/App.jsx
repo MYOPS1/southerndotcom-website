@@ -127,8 +127,9 @@ const resources = [
   { title: 'PDPA notice', href: '/pdpa', type: 'Policy' },
 ];
 
-const portal = (mode) => import.meta.env.MODE === 'preview-auth'
-  ? <AuthPortal mode={mode} />
+const customerAuthEnabled = ['preview-auth', 'production-auth'].includes(import.meta.env.MODE);
+const portal = (mode) => customerAuthEnabled
+  ? <AuthPortal mode={mode} production={import.meta.env.MODE === 'production-auth'} />
   : <AccountPreview mode={['dashboard', 'login', 'register'].includes(mode) ? mode : 'login'} />;
 
 const routes = {
@@ -527,7 +528,7 @@ function LandingPage() {
         </div>
       </section>
 
-      <FoundersPromo />
+      <FoundersPromo production={import.meta.env.MODE === 'production-auth'} />
 
       <section className="content-section alt-panel home-benefits">
         <div className="container">
@@ -778,10 +779,10 @@ const routePageMap = {
 };
 
 function PricingPage() {
-  if (import.meta.env.MODE === 'preview-auth') {
+  if (customerAuthEnabled) {
     return (
       <PageShell pageClass="page-shell-plain">
-        <FoundersPromo />
+        <FoundersPromo production={import.meta.env.MODE === 'production-auth'} />
         <section className="content-section">
           <div className="container narrow-content">
             <SectionIntro label="Services" title="Website & application solutions" text="Custom website development, business applications and integrations are quoted separately based on project scope." />
@@ -1031,5 +1032,5 @@ export default function App() {
     page = routePageMap[pathname] ? routePageMap[pathname]() : <PageComponent />;
   }
 
-  return <SessionProvider enabled={import.meta.env.MODE === 'preview-auth'}>{page}</SessionProvider>;
+  return <SessionProvider enabled={customerAuthEnabled}>{page}</SessionProvider>;
 }
