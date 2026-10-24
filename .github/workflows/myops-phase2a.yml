@@ -42,3 +42,9 @@ jobs:
         run: npm run build
         env:
           VERCEL_ENV: preview
+
+      - name: Build official-domain account authentication
+        run: npm run build
+        env:
+          VERCEL_ENV: production
+          MYOPS_ENABLE_PRODUCTION_AUTH: 'true'
