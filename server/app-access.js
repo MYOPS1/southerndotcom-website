@@ -225,7 +225,7 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
         return { processed: 0, retried: 0, retry_failed: 0, expired_logins: 0, revoked_app_sessions: 0, revoked_tickets: 0, deleted_logins: 0, queued: 0, status: 'invalid' };
       }
       const safe = {
-        processed: Number.isFinite(Number(result.retried)) ? Number(result.retried) : 0,
+        processed: Number.isFinite(Number(result.processed ?? result.retried)) ? Number(result.processed ?? result.retried) : 0,
         retried: Number.isFinite(Number(result.retried)) ? Number(result.retried) : 0,
         retry_failed: Number.isFinite(Number(result.retry_failed)) ? Number(result.retry_failed) : 0,
         expired_logins: Number.isFinite(Number(result.expired_logins)) ? Number(result.expired_logins) : 0,
@@ -233,7 +233,7 @@ export function createAppAccess({ env = process.env, adminFactory = createClient
         revoked_tickets: Number.isFinite(Number(result.revoked_tickets)) ? Number(result.revoked_tickets) : 0,
         deleted_logins: Number.isFinite(Number(result.deleted_logins)) ? Number(result.deleted_logins) : 0,
         queued: Number.isFinite(Number(result.queued)) ? Number(result.queued) : 0,
-        status: 'ok',
+        status: typeof result.status === 'string' && result.status.length ? result.status : 'ok',
       };
       return safe;
     } catch (error) {

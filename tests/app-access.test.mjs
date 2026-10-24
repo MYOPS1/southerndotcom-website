@@ -284,6 +284,24 @@ test('regression S1-B review: a transient lookup failure keeps the session and r
   assert.equal(flaky.calls.some(([name]) => name === 'myops_revoke_app_session'), false);
 });
 
+test('revocation sweep exposes the real processed count without reusing retry totals', async () => {
+  const handler = createAppAccess({
+    env: baseEnv,
+    now: () => NOW,
+    adminFactory: () => ({ rpc: async (name) => {
+      if (name === 'myops_sweep_logins') {
+        return { data: { processed: 9, retried: 4, retry_failed: 2, expired_logins: 3,
+          revoked_app_sessions: 2, revoked_tickets: 1, deleted_logins: 5, queued: 0, status: 'ok' }, error: null };
+      }
+      return { data: true, error: null };
+    } }),
+  });
+  const result = await handler.processRevocations({ batch: 100 });
+  assert.equal(result.processed, 9);
+  assert.equal(result.retried, 4);
+  assert.equal(result.status, 'ok');
+});
+
 test('regression S1-B review: staging isolation and revocation fail closed', async () => {
   const body = { ticket: Buffer.alloc(32, 9).toString('base64url') };
   const notStaging = createAppAccess({ env: { ...baseEnv, MYOPS_ENVIRONMENT: undefined }, adminFactory: () => ({}), now: () => NOW });
